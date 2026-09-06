@@ -1,0 +1,14 @@
+[run]
+source = app
+omit =
+    app/__init__.py
+    */tests/*
+
+[report]
+skip_covered = false
+show_missing = true
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.
