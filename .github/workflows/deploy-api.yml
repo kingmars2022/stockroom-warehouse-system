@@ -1,11 +1,11 @@
 name: Deploy API to AWS App Runner
 
+# Manual trigger only. This pipeline needs AWS_DEPLOY_ROLE_ARN,
+# APP_RUNNER_SERVICE_ARN and AWS_REGION to be configured on the repository;
+# without them it cannot succeed, so it does not run on push. Set those, then
+# run it from the Actions tab.
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - '.github/workflows/deploy-api.yml'
+  workflow_dispatch:
 
 permissions:
   id-token: write
