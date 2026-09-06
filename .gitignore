@@ -1,0 +1,28 @@
+# dependencies / build output
+node_modules/
+.next/
+dist/
+build/
+out/
+target/
+*.class
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# secrets  —  NEVER commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# local tooling
+.DS_Store
+.idea/
+.vscode/
+.m2/
+.npm-cache/
+*.log
