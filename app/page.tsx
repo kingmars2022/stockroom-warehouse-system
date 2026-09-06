@@ -1,13 +1,17 @@
 'use client';
 
 import {
-  ArrowDownToLine, ArrowUpFromLine, BadgeDollarSign, Boxes, Building2,
+  ArrowDownToLine, ArrowUpFromLine, Boxes, Building2,
   Check, ClipboardList, Download, FileText, History, LayoutDashboard,
   LogOut, Menu, Package, Plus, ReceiptText, Search, ShieldCheck,
-  ScanBarcode, Settings2, TrendingDown, TrendingUp, TriangleAlert, Users, X, XCircle,
+  ScanBarcode, Settings2, TrendingDown, TrendingUp, TriangleAlert, X, XCircle,
 } from 'lucide-react';
 import { FormEvent, ReactNode, createContext, useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
 import { api, uploadReceipt } from './lib/api';
+import type {
+  AuditResponse, ExpenseResponse, ItemResponse, MeResponse, MovementResponse,
+  PricePolicyResponse, PurchaseResponse, ReplenishmentResponse, SupplierRecommendation, SupplierResponse,
+} from './lib/types';
 import {
   authenticate,
   beginPasswordReset,
@@ -130,21 +134,13 @@ const withDemoForecast = (store: Store): Store => ({ ...store, replenishment: de
 function stored<T>(key: string, fallback: T): T { if (typeof window === 'undefined') return fallback; try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; } }
 function initials(name: string) { return name.split(' ').map(part => part[0]).join('').slice(0, 2); }
 function isAppearancePreference(value: unknown): value is AppearancePreference { return Boolean(value && typeof value === 'object' && 'mode' in value && 'accent' in value && 'density' in value); }
-function readAttachment(file?: File): Promise<string | undefined> {
-  if (!file || !file.name) return Promise.resolve(undefined);
-  if (file.size > 2 * 1024 * 1024) return Promise.reject(new Error('Attachment must be 2 MB or smaller in the local demo.'));
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : undefined);
-    reader.onerror = () => reject(new Error('Attachment could not be read.'));
-    reader.readAsDataURL(file);
-  });
-}
 
 export default function Home() {
   const [store, setStore] = useState<Store>(emptyStore);
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
+  // In local demo mode there is no session to fetch, so the app is ready on
+  // the first render and the effect below has nothing to wait for.
+  const [loading, setLoading] = useState(!localDemoAuth);
   const [view, setView] = useState<View>('dashboard');
   const [search, setSearch] = useState('');
   const [lowOnly, setLowOnly] = useState(false);
@@ -158,16 +154,30 @@ export default function Home() {
     return saved && typeof saved === 'object' ? saved as AppearancePreferences : {};
   });
   useEffect(() => { localStorage.setItem('stockroom-appearance-v1', JSON.stringify(appearancePreferences)); }, [appearancePreferences]);
+  // The stored locale is read after mount on purpose: localStorage is not
+  // available while the server renders, so seeding state from it during the
+  // first render would produce a hydration mismatch. This runs once and cannot
+  // cascade.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setLocaleState(stored<Locale>('stockroom-locale', 'en')); }, []);
   const refresh = useCallback(async () => {
-    const current = await api<{ id: string; email: string; name: string; role: Role }>('/api/me');
+    const current = await api<MeResponse>('/api/me');
     const nextUser: User = { ...current, scope: current.role === 'admin' ? 'All warehouses and financial data' : current.role === 'supervisor' ? 'Warehouse operations and purchasing' : 'Own stock issues and reimbursements' };
     const [items, movements, expenses] = await Promise.all([
-      api<any[]>('/api/items'), api<any[]>('/api/movements'), api<any[]>('/api/expenses'),
+      api<ItemResponse[]>('/api/items'), api<MovementResponse[]>('/api/movements'), api<ExpenseResponse[]>('/api/expenses'),
     ]);
     const restricted = current.role === 'employee';
-    const [suppliers, purchases, policy, audits, replenishment] = restricted ? [[], [], { threshold_percent: 15 }, [], []] : await Promise.all([
-      api<any[]>('/api/suppliers'), api<any[]>('/api/purchases'), api<{ threshold_percent: number }>('/api/price-policy'), current.role === 'admin' ? api<any[]>('/api/audit-logs') : Promise.resolve([]), api<any[]>('/api/replenishment-recommendations'),
+    // Employees cannot read supplier, purchase, audit or replenishment data, so
+    // the restricted branch supplies empty collections rather than calling
+    // endpoints that would return 403.
+    const restrictedDefaults: [SupplierResponse[], PurchaseResponse[], PricePolicyResponse, AuditResponse[], ReplenishmentResponse[]] =
+      [[], [], { threshold_percent: 15 }, [], []];
+    const [suppliers, purchases, policy, audits, replenishment] = restricted ? restrictedDefaults : await Promise.all([
+      api<SupplierResponse[]>('/api/suppliers'),
+      api<PurchaseResponse[]>('/api/purchases'),
+      api<PricePolicyResponse>('/api/price-policy'),
+      current.role === 'admin' ? api<AuditResponse[]>('/api/audit-logs') : Promise.resolve<AuditResponse[]>([]),
+      api<ReplenishmentResponse[]>('/api/replenishment-recommendations'),
     ]);
     setUser(nextUser);
     setStore({
@@ -177,13 +187,18 @@ export default function Home() {
       purchases: purchases.map(purchase => ({ id: purchase.id, itemId: purchase.item_id, supplierId: purchase.supplier_id, qty: purchase.quantity, unitCost: Number(purchase.unit_cost), currency: purchase.currency, receipt: purchase.receipt_key || 'No attachment', invoice: purchase.invoice_number, at: purchase.created_at, priceChange: purchase.price_change_percent })),
       expenses: expenses.map(expense => ({ id: expense.id, submitter: expense.submitter_id, itemId: expense.item_id || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_id || undefined })),
       audits: audits.map(audit => ({ id: audit.id, actor: audit.actor_id, role: audit.actor_role, action: audit.action, target: audit.target_type, detail: audit.detail, at: audit.created_at })),
-      replenishment: replenishment.map(recommendation => ({ itemId: recommendation.item_id, itemName: recommendation.item_name, sku: recommendation.sku, unit: recommendation.unit, quantityOnHand: recommendation.quantity_on_hand, dailyUsage: recommendation.daily_usage, daysOfCover: recommendation.days_of_cover, suggestedQuantity: recommendation.suggested_quantity, recommendedSupplier: recommendation.recommended_supplier ? { supplierId: recommendation.recommended_supplier.supplier_id, supplierName: recommendation.recommended_supplier.supplier_name, unitCost: Number(recommendation.recommended_supplier.unit_cost), currency: recommendation.recommended_supplier.currency, leadDays: recommendation.recommended_supplier.lead_days, rating: recommendation.recommended_supplier.rating, score: recommendation.recommended_supplier.score } : null, alternatives: recommendation.alternatives.map((option: any) => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency, leadDays: option.lead_days, rating: option.rating, score: option.score })) })),
+      replenishment: replenishment.map(recommendation => ({ itemId: recommendation.item_id, itemName: recommendation.item_name, sku: recommendation.sku, unit: recommendation.unit, quantityOnHand: recommendation.quantity_on_hand, dailyUsage: recommendation.daily_usage, daysOfCover: recommendation.days_of_cover, suggestedQuantity: recommendation.suggested_quantity, recommendedSupplier: recommendation.recommended_supplier ? { supplierId: recommendation.recommended_supplier.supplier_id, supplierName: recommendation.recommended_supplier.supplier_name, unitCost: Number(recommendation.recommended_supplier.unit_cost), currency: recommendation.recommended_supplier.currency, leadDays: recommendation.recommended_supplier.lead_days, rating: recommendation.recommended_supplier.rating, score: recommendation.recommended_supplier.score } : null, alternatives: recommendation.alternatives.map((option: SupplierRecommendation) => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency, leadDays: option.lead_days, rating: option.rating, score: option.score })) })),
       threshold: policy.threshold_percent,
       defaultAppearance,
     });
   }, []);
+  // Loads the session and dashboard data once on mount. Every state update
+  // inside `refresh` happens after an await, and the catch/finally handlers run
+  // on promise resolution - none of it is the synchronous, cascading update the
+  // rule guards against, which it cannot see through the async boundary.
   useEffect(() => {
-    if (localDemoAuth) { setLoading(false); return; }
+    if (localDemoAuth) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh().catch(() => setUser(null)).finally(() => setLoading(false));
   }, [refresh]);
   const appearancePreference = user ? appearancePreferences[user.email] || { ...defaultAppearance, followCompanyDefault: true } : { ...defaultAppearance, followCompanyDefault: true };
@@ -334,7 +349,7 @@ export default function Home() {
         {view === 'inventory' && <Inventory items={items} search={search} setSearch={setSearch} lowOnly={lowOnly} clearLow={() => setLowOnly(false)} canManage={canManage} add={() => setDialog('item')} />}
         {view === 'activity' && canSeeActivity && <Activity movements={visibleMoves} items={store.items} />}
         {view === 'procurement' && canReceive && <Procurement purchases={store.purchases} suppliers={store.suppliers} items={store.items} alerts={priceAlerts} replenishment={store.replenishment} threshold={store.threshold} canManage={canManage} setThreshold={updatePriceThreshold} add={() => setDialog('purchase')} />}
-        {view === 'expenses' && <Expenses expenses={visibleExpenses} items={store.items} user={user} canApprove={canApprove} canPay={canManage} add={() => setDialog('expense')} update={updateExpense} />}
+        {view === 'expenses' && <Expenses expenses={visibleExpenses} items={store.items} canApprove={canApprove} canPay={canManage} add={() => setDialog('expense')} update={updateExpense} />}
         {view === 'audit' && canAudit && <AuditLog audits={store.audits} />}
         {view === 'settings' && <AppearanceSettings preference={appearancePreference} companyDefault={store.defaultAppearance} canManage={canManage} updatePreference={updateAppearancePreference} updateCompanyDefault={updateCompanyAppearance} />}
       </div>
@@ -362,7 +377,7 @@ function Activity({ movements, items }: { movements: Movement[]; items: Item[] }
 function Procurement({ purchases, suppliers, items, alerts, replenishment, threshold, canManage, setThreshold, add }: { purchases: Purchase[]; suppliers: Supplier[]; items: Item[]; alerts: Purchase[]; replenishment: Replenishment[]; threshold: number; canManage: boolean; setThreshold: (value: number) => void; add: () => void }) { return <><div className="procurement-top"><section className="panel price-policy"><div><p className="eyebrow">Price monitoring</p><h3>Alert when a purchase price rises by</h3><p className="small-copy">Compare the newest price with the prior purchase of the same item.</p></div>{canManage ? <label className="threshold"><input type="number" min="1" defaultValue={threshold} key={threshold} onBlur={event => setThreshold(Number(event.currentTarget.value) || 1)} />%</label> : <strong>{threshold}%</strong>}</section><section className="panel supplier-summary"><PanelHeading title="Supplier coverage" note="Preferred and backup options" />{suppliers.map(supplier => <div key={supplier.id} className="supplier-row"><div><b>{supplier.name}</b><small>{supplier.leadDays}-day lead time · {supplier.rating}/5 rating</small></div><Status tone={supplier.status === 'preferred' ? 'good' : supplier.status === 'paused' ? 'danger' : 'neutral'}>{supplier.status}</Status></div>)}</section></div>{replenishment.length > 0 && <section className="panel recommendation-panel"><PanelHeading title="Recommended purchase plan" note="Ranked by latest price, lead time, supplier rating, and preferred status" />{replenishment.map(recommendation => <div className="recommendation-row" key={recommendation.itemId}><div><b>{recommendation.itemName}</b><small>{recommendation.quantityOnHand} {recommendation.unit} on hand · {recommendation.daysOfCover === null ? 'low stock' : `${recommendation.daysOfCover} days of cover`}</small></div><div><strong>Order {recommendation.suggestedQuantity} {recommendation.unit}</strong><small>{recommendation.recommendedSupplier ? `Recommended: ${recommendation.recommendedSupplier.supplierName} · ${money(recommendation.recommendedSupplier.unitCost, recommendation.recommendedSupplier.currency)} · ${recommendation.recommendedSupplier.leadDays}-day lead time` : 'No supplier price history yet'}</small></div></div>)}</section>}<section className="panel"><div className="table-tools"><div><b>Purchases and price history</b><small className="block-note">Each receipt updates price history and may produce an alert.</small></div><button className="primary" onClick={add}><Plus size={17} />Receive purchase</button></div><div className="table-wrap"><table><thead><tr><th>Purchase date</th><th>Item / supplier</th><th>Quantity</th><th>Unit cost</th><th>Change</th><th>Attachment</th></tr></thead><tbody>{purchases.map(purchase => { const item = items.find(entry => entry.id === purchase.itemId); const supplier = suppliers.find(entry => entry.id === purchase.supplierId); return <tr key={purchase.id}><td>{date(purchase.at)}</td><td><b>{item?.name}</b><small>{supplier?.name} · {purchase.invoice}</small></td><td>{purchase.qty} {item?.unit}</td><td><b>{money(purchase.unitCost, purchase.currency)}</b></td><td><span className={purchase.priceChange >= threshold ? 'price-up' : purchase.priceChange < 0 ? 'price-down' : 'price-flat'}>{purchase.priceChange > 0 ? <TrendingUp size={14} /> : purchase.priceChange < 0 ? <TrendingDown size={14} /> : null}{purchase.priceChange === 0 ? 'First price' : `${purchase.priceChange > 0 ? '+' : ''}${purchase.priceChange}%`}</span></td><td><ReceiptAttachment name={purchase.receipt} url={purchase.receiptUrl} /></td></tr>; })}</tbody></table></div></section>{alerts.length > 0 && <section className="panel alert-panel"><PanelHeading title="Supplier review recommended" note="These purchases exceeded the configured price-increase threshold." />{alerts.map(alert => { const item = items.find(entry => entry.id === alert.itemId); const alternatives = purchases.filter(entry => entry.itemId === alert.itemId && entry.supplierId !== alert.supplierId).slice(0, 2); return <div key={alert.id} className="alert-row"><TriangleAlert size={19} /><div><b>{item?.name} increased {alert.priceChange}%</b><small>Current purchase: {money(alert.unitCost)}. Alternative recent prices: {alternatives.map(entry => money(entry.unitCost)).join(', ') || 'No alternate supplier data yet'}.</small></div></div>; })}</section>}</>;
 }
 
-function Expenses({ expenses, items, user, canApprove, canPay, add, update }: { expenses: Expense[]; items: Item[]; user: User; canApprove: boolean; canPay: boolean; add: () => void; update: (expense: Expense, status: ExpenseStatus) => void }) { return <section className="panel"><div className="table-tools"><div><b>Reimbursements</b><small className="block-note">Receipts, approval history, and payment state.</small></div><button className="primary" onClick={add}><Plus size={17} />Submit expense</button></div><div className="table-wrap"><table><thead><tr><th>Submitted</th><th>Employee / item</th><th>Supplier / purpose</th><th>Receipt</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{expenses.map(expense => { const item = items.find(entry => entry.id === expense.itemId); return <tr key={expense.id}><td>{date(expense.at)}</td><td><b>{expense.submitter}</b><small>{item?.name} · {expense.qty} {item?.unit}</small></td><td><b>{expense.supplier}</b><small>{expense.purpose}</small></td><td><ReceiptAttachment name={expense.receipt} url={expense.receiptUrl} /></td><td><b>{money(expense.amount, expense.currency)}</b></td><td><Status tone={expense.status === 'paid' || expense.status === 'approved' ? 'good' : expense.status === 'rejected' ? 'danger' : 'warn'}>{expense.status}</Status>{expense.reviewer && <small>{expense.reviewer}</small>}</td><td><div className="row-actions">{expense.status === 'submitted' && canApprove && <><IconButton label="Approve reimbursement" onClick={() => update(expense, 'approved')}><Check size={16} /></IconButton><IconButton label="Reject reimbursement" onClick={() => update(expense, 'rejected')}><XCircle size={16} /></IconButton></>}{expense.status === 'approved' && canPay && <button className="pay-button" onClick={() => update(expense, 'paid')}>Mark paid</button>}</div></td></tr>; })}{!expenses.length && <tr><td colSpan={7}><Empty label="No reimbursement submissions in your visible scope." /></td></tr>}</tbody></table></div></section>; }
+function Expenses({ expenses, items, canApprove, canPay, add, update }: { expenses: Expense[]; items: Item[]; canApprove: boolean; canPay: boolean; add: () => void; update: (expense: Expense, status: ExpenseStatus) => void }) { return <section className="panel"><div className="table-tools"><div><b>Reimbursements</b><small className="block-note">Receipts, approval history, and payment state.</small></div><button className="primary" onClick={add}><Plus size={17} />Submit expense</button></div><div className="table-wrap"><table><thead><tr><th>Submitted</th><th>Employee / item</th><th>Supplier / purpose</th><th>Receipt</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{expenses.map(expense => { const item = items.find(entry => entry.id === expense.itemId); return <tr key={expense.id}><td>{date(expense.at)}</td><td><b>{expense.submitter}</b><small>{item?.name} · {expense.qty} {item?.unit}</small></td><td><b>{expense.supplier}</b><small>{expense.purpose}</small></td><td><ReceiptAttachment name={expense.receipt} url={expense.receiptUrl} /></td><td><b>{money(expense.amount, expense.currency)}</b></td><td><Status tone={expense.status === 'paid' || expense.status === 'approved' ? 'good' : expense.status === 'rejected' ? 'danger' : 'warn'}>{expense.status}</Status>{expense.reviewer && <small>{expense.reviewer}</small>}</td><td><div className="row-actions">{expense.status === 'submitted' && canApprove && <><IconButton label="Approve reimbursement" onClick={() => update(expense, 'approved')}><Check size={16} /></IconButton><IconButton label="Reject reimbursement" onClick={() => update(expense, 'rejected')}><XCircle size={16} /></IconButton></>}{expense.status === 'approved' && canPay && <button className="pay-button" onClick={() => update(expense, 'paid')}>Mark paid</button>}</div></td></tr>; })}{!expenses.length && <tr><td colSpan={7}><Empty label="No reimbursement submissions in your visible scope." /></td></tr>}</tbody></table></div></section>; }
 
 function AuditLog({ audits }: { audits: Audit[] }) { return <section className="panel"><PanelHeading title="Administrative audit log" note="Immutable history of the actions performed in this system." /><div className="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>{audits.map(entry => <tr key={entry.id}><td>{date(entry.at)}</td><td><b>{entry.actor}</b></td><td><Status tone={entry.role === 'admin' ? 'good' : entry.role === 'supervisor' ? 'neutral' : 'warn'}>{roleLabel[entry.role]}</Status></td><td>{entry.action}</td><td><b>{entry.target}</b></td><td>{entry.detail}</td></tr>)}</tbody></table></div></section>; }
 function AppearanceSettings({ preference, companyDefault, canManage, updatePreference, updateCompanyDefault }: { preference: AppearancePreference; companyDefault: Appearance; canManage: boolean; updatePreference: (value: AppearancePreference | ((value: AppearancePreference) => AppearancePreference)) => void; updateCompanyDefault: (value: Appearance) => void }) {
@@ -399,13 +414,18 @@ function BarcodeScanner({ onDetected }: { onDetected: (value: string) => void })
   const [error, setError] = useState('');
   useEffect(() => {
     let active = true;
-    let scanner: { start: (...args: any[]) => Promise<unknown>; stop: () => Promise<unknown>; pause: (shouldPauseVideo?: boolean) => void } | undefined;
+    // Take the scanner's real type from the library rather than describing it
+    // by hand: a hand-written shape drifts, and a loose one hides mistakes.
+    // This is a type-only import, so it adds nothing to the bundle.
+    type Scanner = InstanceType<typeof import('html5-qrcode').Html5Qrcode>;
+    let scanner: Scanner | undefined;
     const start = async () => {
       try {
         const { Html5Qrcode } = await import('html5-qrcode');
         if (!active) return;
-        scanner = new Html5Qrcode(scannerId);
-        await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 140 } }, (decodedText: string) => { scanner?.pause(true); onDetected(decodedText); }, () => undefined);
+        const instance = new Html5Qrcode(scannerId);
+        scanner = instance;
+        await instance.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 220, height: 140 } }, (decodedText: string) => { instance.pause(true); onDetected(decodedText); }, () => undefined);
       } catch {
         if (active) setError('Camera scanning is unavailable. Check camera permission or enter the SKU manually.');
       }

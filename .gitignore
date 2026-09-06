@@ -26,3 +26,6 @@ venv/
 .m2/
 .npm-cache/
 *.log
+
+# TypeScript incremental build cache
+*.tsbuildinfo

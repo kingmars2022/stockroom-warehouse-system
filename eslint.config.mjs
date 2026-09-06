@@ -5,7 +5,17 @@ import nextTs from 'eslint-config-next/typescript';
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
-  globalIgnores(['.next/**', 'out/**', 'build/**', 'next-env.d.ts']),
+  // `backend/` is the Python service; its virtualenv ships vendored JS that is
+  // not ours to lint.
+  globalIgnores([
+    '.next/**',
+    'out/**',
+    'build/**',
+    'dist/**',
+    'node_modules/**',
+    'backend/**',
+    'next-env.d.ts',
+  ]),
 ]);
 
 export default eslintConfig;
