@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stockroom
+      POSTGRES_USER: stockroom
+      POSTGRES_PASSWORD: stockroom
+    ports:
+      - "5432:5432"
+    volumes:
+      - stockroom_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stockroom -d stockroom"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://stockroom:stockroom@db:5432/stockroom
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  stockroom_postgres:
