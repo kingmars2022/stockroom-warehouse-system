@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .cache import REPLENISHMENT_KEY, REPLENISHMENT_PREFIX, get_cache
 from .models import AuditLog, Expense, ExpenseStatus, Item, MovementKind, Purchase, Role, StockMovement, Supplier, SupplierStatus, SystemSetting, User
 
 
@@ -79,6 +80,22 @@ def replenishment_recommendations(db: Session) -> list[dict]:
     return sorted(recommendations, key=lambda item: (item["days_of_cover"] is None, item["days_of_cover"] or 9999, item["item_name"]))
 
 
+def invalidate_replenishment_cache() -> int:
+    """Drop cached replenishment guidance. Called after any write that changes
+    stock levels, purchase history, or the supplier pool."""
+    return get_cache().invalidate(REPLENISHMENT_PREFIX)
+
+
+def cached_replenishment_recommendations(db: Session) -> list[dict]:
+    """Read-through cached view of :func:`replenishment_recommendations`.
+
+    Values round-trip through JSON, so UUIDs come back as strings; the
+    endpoint's response model coerces them back. Callers that need native
+    UUIDs (tests, internal logic) should use the uncached function directly.
+    """
+    return get_cache().get_or_set(REPLENISHMENT_KEY, lambda: replenishment_recommendations(db))
+
+
 def write_audit(db: Session, actor: User, action: str, target_type: str, target_id: str, detail: str) -> None:
     db.add(AuditLog(actor_id=actor.id, actor_role=actor.role, action=action, target_type=target_type, target_id=target_id, detail=detail))
 
@@ -119,6 +136,7 @@ def record_movement(db: Session, actor: User, item_id, kind: MovementKind, quant
         write_audit(db, actor, "received_stock" if kind is MovementKind.inbound else "issued_stock", "item", str(item.id), f"{quantity} {item.unit} {'received from' if kind is MovementKind.inbound else 'issued to'} {recipient}")
     db.commit()
     db.refresh(movement)
+    invalidate_replenishment_cache()
     return movement
 
 
@@ -144,6 +162,7 @@ def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: in
         write_audit(db, actor, "received_purchase", "purchase", str(purchase.id), f"{quantity} {item.unit} at {unit_cost:.2f} {currency.upper()}; price change {change}%")
     db.commit()
     db.refresh(purchase)
+    invalidate_replenishment_cache()
     return purchase
 
 

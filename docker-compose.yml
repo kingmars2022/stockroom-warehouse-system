@@ -15,6 +15,19 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7.4-alpine
+    # Cache only: bounded memory, LRU eviction, no persistence. Losing this
+    # container costs a recomputation, never data.
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build: ./backend
     env_file: ./backend/.env
@@ -22,10 +35,14 @@ services:
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://stockroom:stockroom@db:5432/stockroom
       CORS_ORIGINS: http://localhost:3000
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL_SECONDS: "60"
     ports:
       - "8000:8000"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
 volumes:

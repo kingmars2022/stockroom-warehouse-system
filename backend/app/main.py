@@ -12,7 +12,8 @@ from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
 from .schemas import AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
-from .services import create_expense, get_price_threshold, record_movement, record_purchase, replenishment_recommendations, update_expense_status, update_price_threshold, write_audit
+from .cache import get_cache
+from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
 
 settings = get_settings()
 
@@ -22,8 +23,13 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allo
 
 
 @app.get("/health")
-def health_check() -> dict[str, str]:
-    return {"status": "ok", "service": "stockroom-api"}
+def health_check() -> dict:
+    cache = get_cache()
+    return {
+        "status": "ok",
+        "service": "stockroom-api",
+        "cache": {"backend": cache.backend_name, "ttl_seconds": cache.ttl_seconds, **cache.stats.as_dict()},
+    }
 
 
 @app.get("/api/me", response_model=MeResponse)
@@ -47,6 +53,7 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User =
         write_audit(db, user, "created_item", "item", str(item.id), f"Created SKU {item.sku}")
     db.commit()
     db.refresh(item)
+    invalidate_replenishment_cache()
     return item
 
 
@@ -77,6 +84,7 @@ def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), user
         write_audit(db, user, "created_supplier", "supplier", str(supplier.id), f"Created supplier {supplier.name}")
     db.commit()
     db.refresh(supplier)
+    invalidate_replenishment_cache()
     return supplier
 
 
@@ -102,7 +110,7 @@ def set_price_policy(payload: PricePolicyUpdate, db: Session = Depends(get_db), 
 
 @app.get("/api/replenishment-recommendations", response_model=list[ReplenishmentRecommendation])
 def list_replenishment_recommendations(_: User = Depends(require_roles(Role.admin, Role.supervisor)), db: Session = Depends(get_db)):
-    return replenishment_recommendations(db)
+    return cached_replenishment_recommendations(db)
 
 
 @app.get("/api/expenses", response_model=list[ExpenseResponse])
