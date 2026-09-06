@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: stockroom-config
+  namespace: stockroom
+  labels:
+    app.kubernetes.io/name: stockroom
+data:
+  APP_ENV: "production"
+  AWS_REGION: "us-east-1"
+  COGNITO_REGION: "us-east-1"
+  CORS_ORIGINS: "https://stockroom.example.com"
+  REDIS_URL: "redis://stockroom-redis:6379/0"
+  CACHE_TTL_SECONDS: "60"
+  MAX_RECEIPT_SIZE_BYTES: "10485760"

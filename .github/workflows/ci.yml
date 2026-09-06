@@ -19,10 +19,54 @@ jobs:
 
   api:
     runs-on: ubuntu-latest
+    # Redis runs as a service so the cache path is exercised against a real
+    # server in CI, not only against the in-memory fallback.
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: pip
       - run: pip install -r backend/requirements-dev.txt
-      - run: PYTHONPATH=backend pytest backend/tests
+
+      # pytest.ini sets --cov=app and --cov-fail-under=80, so the job fails
+      # if coverage regresses below the threshold.
+      - name: Run tests with coverage
+        working-directory: backend
+        run: pytest
+
+      # Second pass against a live Redis: same suite, real backend.
+      - name: Run cache tests against live Redis
+        working-directory: backend
+        env:
+          REDIS_URL: redis://localhost:6379/0
+        run: pytest tests/test_cache.py --no-cov -q
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: backend/coverage.xml
+          if-no-files-found: ignore
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Kubernetes manifests
+        run: |
+          curl -sSLo kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xf kubeconform.tar.gz kubeconform
+          ./kubeconform -strict -summary -ignore-missing-schemas infra/k8s/

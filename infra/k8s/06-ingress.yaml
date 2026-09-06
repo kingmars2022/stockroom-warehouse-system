@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: stockroom-api
+  namespace: stockroom
+  labels:
+    app.kubernetes.io/name: stockroom
+    app.kubernetes.io/component: api
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.stockroom.example.com
+      secretName: stockroom-api-tls
+  rules:
+    - host: api.stockroom.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: stockroom-api
+                port:
+                  name: http
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: stockroom-api
+                port:
+                  name: http
