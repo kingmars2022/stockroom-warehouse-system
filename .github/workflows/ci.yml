@@ -15,12 +15,17 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm run build
 
   api:
     runs-on: ubuntu-latest
     # Redis runs as a service so the cache path is exercised against a real
-    # server in CI, not only against the in-memory fallback.
+    # server in CI, not only against the in-memory fallback. Postgres runs
+    # as a service so the row-level SELECT ... FOR UPDATE lock in
+    # record_movement can be tested under real concurrency -- every other
+    # test in this suite runs on SQLite, which has no row-level locking to
+    # exercise.
     services:
       redis:
         image: redis:7.4-alpine
@@ -30,6 +35,19 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 3s
+          --health-retries 10
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: stockroom_test
+          POSTGRES_USER: stockroom
+          POSTGRES_PASSWORD: stockroom
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stockroom -d stockroom_test"
+          --health-interval 5s
+          --health-timeout 5s
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +69,14 @@ jobs:
         env:
           REDIS_URL: redis://localhost:6379/0
         run: pytest tests/test_cache.py --no-cov -q
+
+      # Third pass against a real Postgres: proves the row lock actually
+      # prevents overselling under concurrent access, which SQLite can't test.
+      - name: Run the row-lock concurrency test against live PostgreSQL
+        working-directory: backend
+        env:
+          POSTGRES_TEST_URL: postgresql+psycopg://stockroom:stockroom@localhost:5432/stockroom_test
+        run: pytest tests/test_concurrency.py --no-cov -q
 
       - name: Upload coverage report
         if: always()

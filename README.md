@@ -586,11 +586,18 @@ The API test suite covers critical business rules:
 - Reimbursement approval requires a supervisor or administrator, and payment requires an administrator.
 - Replenishment recommendations return an attention item and rank suppliers using price and lead time.
 
-Run API tests locally:
+Run API tests locally (`pytest.ini` sets `pythonpath = .`, so run it from inside `backend/`, not the repo root — running it from the repo root breaks coverage measurement):
 
 ```bash
 pip install -r backend/requirements-dev.txt
-PYTHONPATH=backend pytest backend/tests
+cd backend && pytest
+```
+
+The suite above runs on SQLite for speed and isolation, which means one thing it can't exercise is the `SELECT ... FOR UPDATE` row lock in `record_movement` -- SQLite has no row-level locking. `tests/test_concurrency.py` covers that: 20 threads race to issue stock for an item with 10 units on hand, and it self-skips unless `POSTGRES_TEST_URL` points at a real, disposable PostgreSQL database:
+
+```bash
+POSTGRES_TEST_URL=postgresql+psycopg://stockroom:stockroom@localhost:5432/stockroom_test \
+    pytest tests/test_concurrency.py --no-cov
 ```
 
 Run the production frontend build:
@@ -603,10 +610,9 @@ npm run build
 
 `.github/workflows/ci.yml` runs for pull requests and pushes to `main`:
 
-1. Install Node.js 20 dependencies with `npm ci`.
-2. Build the Next.js frontend.
-3. Install Python 3.12 API test dependencies.
-4. Run `PYTHONPATH=backend pytest backend/tests`.
+- **`frontend`** — `npm ci`, `npm run lint`, `npm run build`.
+- **`api`** — installs Python 3.12 dependencies, then runs the suite three times: once with coverage (`pytest.ini` sets `--cov=app --cov-fail-under=80`, so the job fails if coverage regresses), once more against a live Redis service (`test_cache.py` only, so the cache path is exercised against a real server instead of only the in-memory fallback), and once more against a live PostgreSQL service (`test_concurrency.py` only, proving the row lock holds under real concurrency). The coverage XML is uploaded as a build artifact.
+- **`manifests`** — validates everything under `infra/k8s/` with [kubeconform](https://github.com/yannh/kubeconform).
 
 ### Manual acceptance checklist
 
