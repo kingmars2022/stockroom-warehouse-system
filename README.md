@@ -606,6 +606,15 @@ Run the production frontend build:
 npm run build
 ```
 
+### Load testing
+
+`backend/loadtest/` runs the real application (not a mock) against a real,
+disposable PostgreSQL + Redis, driven by concurrent virtual users over
+actual HTTP. Measured with 50 concurrent users for 30 seconds on a single
+unscaled `uvicorn` process: **163.5 req/s, 0 errors, p95 latency 272.7 ms**
+-- see `backend/loadtest/README.md` for the full methodology, numbers, and
+how to reproduce it.
+
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs for pull requests and pushes to `main`:
