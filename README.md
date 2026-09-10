@@ -5,16 +5,10 @@ cannot go negative, purchases carry a price-change trail, reimbursements run
 through an approval chain, and every state change lands in an audit log.
 
 ![Dashboard](docs/screenshots/dashboard.png)
-
-<details>
-<summary>More screenshots — login, issuing stock, procurement, audit log</summary>
-
-| | |
-|---|---|
-| ![Login](docs/screenshots/login.png) | ![Issue stock](docs/screenshots/issue-stock.png) |
-| ![Procurement](docs/screenshots/procurement.png) | ![Audit log](docs/screenshots/audit-log.png) |
-
-</details>
+![Login](docs/screenshots/login.png)
+![Issue stock](docs/screenshots/issue-stock.png)
+![Procurement](docs/screenshots/procurement.png)
+![Audit log](docs/screenshots/audit-log.png)
 
 ```mermaid
 flowchart LR
