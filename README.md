@@ -4,6 +4,18 @@ A warehouse operations API and console: stock moves in and out under a lock that
 cannot go negative, purchases carry a price-change trail, reimbursements run
 through an approval chain, and every state change lands in an audit log.
 
+![Dashboard](docs/screenshots/dashboard.png)
+
+<details>
+<summary>More screenshots — login, issuing stock, procurement, audit log</summary>
+
+| | |
+|---|---|
+| ![Login](docs/screenshots/login.png) | ![Issue stock](docs/screenshots/issue-stock.png) |
+| ![Procurement](docs/screenshots/procurement.png) | ![Audit log](docs/screenshots/audit-log.png) |
+
+</details>
+
 ```mermaid
 flowchart LR
     B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>19 endpoints"]
@@ -83,6 +95,8 @@ answers the second one by driving the real app with concurrent virtual users
 over real HTTP. 50 users, 30 seconds, one unscaled `uvicorn` process:
 **163.5 req/s, 0 errors, p95 272.7 ms**, stock and per-user scoping still
 correct under the load.
+
+![Load test results](docs/screenshots/loadtest-results.png)
 
 ## Run it
 
