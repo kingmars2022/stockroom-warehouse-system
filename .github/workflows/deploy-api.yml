@@ -31,7 +31,12 @@ jobs:
         run: |
           docker build -t "$REGISTRY/$REPOSITORY:$IMAGE_TAG" backend
           docker push "$REGISTRY/$REPOSITORY:$IMAGE_TAG"
-      - name: Deploy the new image
+      - name: Deploy the pushed immutable image
         env:
           SERVICE_ARN: ${{ secrets.APP_RUNNER_SERVICE_ARN }}
-        run: aws apprunner start-deployment --service-arn "$SERVICE_ARN"
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: stockroom-api
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          SOURCE_CONFIGURATION="$(aws apprunner describe-service --service-arn "$SERVICE_ARN" | jq -c --arg image "$REGISTRY/$REPOSITORY:$IMAGE_TAG" '.Service.SourceConfiguration | .ImageRepository.ImageIdentifier = $image')"
+          aws apprunner update-service --service-arn "$SERVICE_ARN" --source-configuration "$SOURCE_CONFIGURATION"

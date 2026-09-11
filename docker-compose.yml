@@ -30,7 +30,11 @@ services:
 
   api:
     build: ./backend
-    env_file: ./backend/.env
+    env_file:
+      # Optional local overrides (for example, Cognito and S3 values). The
+      # compose defaults below are enough to run the API in local demo mode.
+      - path: ./backend/.env
+        required: false
     environment:
       APP_ENV: development
       DATABASE_URL: postgresql+psycopg://stockroom:stockroom@db:5432/stockroom

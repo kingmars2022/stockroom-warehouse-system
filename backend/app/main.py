@@ -5,7 +5,7 @@ import boto3
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .auth import get_current_user, require_roles
 from .config import get_settings
@@ -20,6 +20,54 @@ settings = get_settings()
 
 app = FastAPI(title="Stockroom API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+
+
+def movement_response(movement: StockMovement, actor_name: str) -> MovementResponse:
+    return MovementResponse(
+        id=movement.id,
+        item_id=movement.item_id,
+        kind=movement.kind,
+        quantity=movement.quantity,
+        actor_id=movement.actor_id,
+        actor_name=actor_name,
+        recipient=movement.recipient,
+        note=movement.note,
+        created_at=movement.created_at,
+    )
+
+
+def expense_response(expense: Expense, submitter_name: str, reviewer_name: str | None = None) -> ExpenseResponse:
+    return ExpenseResponse(
+        id=expense.id,
+        submitter_id=expense.submitter_id,
+        submitter_name=submitter_name,
+        item_id=expense.item_id,
+        supplier=expense.supplier,
+        quantity=expense.quantity,
+        amount=expense.amount,
+        currency=expense.currency,
+        purpose=expense.purpose,
+        receipt_key=expense.receipt_key,
+        status=expense.status,
+        reviewer_id=expense.reviewer_id,
+        reviewer_name=reviewer_name,
+        created_at=expense.created_at,
+        updated_at=expense.updated_at,
+    )
+
+
+def audit_response(audit: AuditLog, actor_name: str) -> AuditResponse:
+    return AuditResponse(
+        id=audit.id,
+        actor_id=audit.actor_id,
+        actor_name=actor_name,
+        actor_role=audit.actor_role,
+        action=audit.action,
+        target_type=audit.target_type,
+        target_id=audit.target_id,
+        detail=audit.detail,
+        created_at=audit.created_at,
+    )
 
 
 @app.get("/health")
@@ -59,15 +107,17 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User =
 
 @app.get("/api/movements", response_model=list[MovementResponse])
 def list_movements(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    query = select(StockMovement).order_by(StockMovement.created_at.desc())
+    actor = aliased(User)
+    query = select(StockMovement, actor.name).join(actor, StockMovement.actor_id == actor.id).order_by(StockMovement.created_at.desc())
     if user.role is Role.employee:
         query = query.where(StockMovement.actor_id == user.id)
-    return db.scalars(query).all()
+    return [movement_response(movement, actor_name) for movement, actor_name in db.execute(query).all()]
 
 
 @app.post("/api/movements", response_model=MovementResponse, status_code=status.HTTP_201_CREATED)
 def create_movement(payload: MovementCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return record_movement(db, user, payload.item_id, payload.kind, payload.quantity, payload.recipient, payload.note)
+    movement = record_movement(db, user, payload.item_id, payload.kind, payload.quantity, payload.recipient, payload.note)
+    return movement_response(movement, user.name)
 
 
 @app.get("/api/suppliers", response_model=list[SupplierResponse])
@@ -115,25 +165,37 @@ def list_replenishment_recommendations(_: User = Depends(require_roles(Role.admi
 
 @app.get("/api/expenses", response_model=list[ExpenseResponse])
 def list_expenses(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    query = select(Expense).order_by(Expense.created_at.desc())
+    submitter = aliased(User)
+    reviewer = aliased(User)
+    query = (
+        select(Expense, submitter.name, reviewer.name)
+        .join(submitter, Expense.submitter_id == submitter.id)
+        .outerjoin(reviewer, Expense.reviewer_id == reviewer.id)
+        .order_by(Expense.created_at.desc())
+    )
     if user.role is Role.employee:
         query = query.where(Expense.submitter_id == user.id)
-    return db.scalars(query).all()
+    return [expense_response(expense, submitter_name, reviewer_name) for expense, submitter_name, reviewer_name in db.execute(query).all()]
 
 
 @app.post("/api/expenses", response_model=ExpenseResponse, status_code=status.HTTP_201_CREATED)
 def submit_expense(payload: ExpenseCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return create_expense(db, user, **payload.model_dump())
+    expense = create_expense(db, user, **payload.model_dump())
+    return expense_response(expense, user.name)
 
 
 @app.patch("/api/expenses/{expense_id}/status", response_model=ExpenseResponse)
 def set_expense_status(expense_id: uuid.UUID, payload: ExpenseStatusUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return update_expense_status(db, user, expense_id, payload.status)
+    expense = update_expense_status(db, user, expense_id, payload.status)
+    submitter_name = db.scalar(select(User.name).where(User.id == expense.submitter_id))
+    return expense_response(expense, submitter_name, user.name if expense.reviewer_id else None)
 
 
 @app.get("/api/audit-logs", response_model=list[AuditResponse])
 def list_audit_logs(_: User = Depends(require_roles(Role.admin)), db: Session = Depends(get_db)):
-    return db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc())).all()
+    actor = aliased(User)
+    query = select(AuditLog, actor.name).join(actor, AuditLog.actor_id == actor.id).order_by(AuditLog.created_at.desc())
+    return [audit_response(audit, actor_name) for audit, actor_name in db.execute(query).all()]
 
 
 @app.post("/api/attachments/presign", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)

@@ -551,12 +551,13 @@ terraform output database_secret_arn
 
 The repository contains `.github/workflows/deploy-api.yml`.
 
-When a change under `backend/` is pushed to `main`, the workflow:
+When manually triggered after a backend change, the workflow:
 
 1. Assumes an AWS role through GitHub OIDC.
 2. Builds the FastAPI container.
 3. Pushes the image to the `stockroom-api` ECR repository.
-4. Requests a new deployment from the configured AWS App Runner service.
+4. Updates the App Runner source configuration to the exact immutable ECR image
+   tagged with the Git commit SHA, which begins a deployment of that image.
 
 Configure these GitHub values before enabling a production deployment:
 
@@ -654,7 +655,7 @@ how to reproduce it.
 │   ├── alembic/                 # Database migration configuration and revisions
 │   ├── tests/                   # API workflow tests
 │   ├── Dockerfile               # FastAPI container image
-│   └── start.sh                 # Migration then API startup command
+│   └── start.sh                 # Optional local migration then API startup command
 ├── infra/terraform/             # AWS infrastructure definitions
 ├── .github/workflows/           # CI validation and API deployment workflow
 ├── docker-compose.yml           # PostgreSQL + FastAPI local stack

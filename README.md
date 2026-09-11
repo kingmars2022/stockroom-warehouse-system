@@ -99,6 +99,10 @@ docker compose up -d          # PostgreSQL + Redis + API on :8000
 npm install && npm run dev    # console on :3000
 ```
 
+`backend/.env` is optional for the local demo. Copy
+[`backend/.env.example`](backend/.env.example) to `backend/.env` only when
+testing a Cognito user pool, S3 receipts, or other local AWS overrides.
+
 Backend tests:
 
 ```bash

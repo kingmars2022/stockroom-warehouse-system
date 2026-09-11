@@ -10,6 +10,7 @@ and these manifests run the workload itself.
 | File | Purpose |
 |---|---|
 | `00-namespace.yaml` | `stockroom` namespace |
+| `00-migration-job.yaml` | one-off Alembic migration before API replicas start |
 | `01-configmap.yaml` | non-secret settings (CORS, cache TTL, AWS region) |
 | `02-secret.example.yaml` | template for the database URL and Cognito ids — **do not commit real values** |
 | `03-redis.yaml` | single-replica Redis with a `Deployment` + `ClusterIP` `Service` |
@@ -27,10 +28,20 @@ kubectl -n stockroom create secret generic stockroom-secrets \
   --from-literal=COGNITO_USER_POOL_ID='us-east-1_xxxxxxxxx' \
   --from-literal=COGNITO_APP_CLIENT_ID='xxxxxxxxxxxxxxxxxxxxxxxxxx'
 
-# 2. Apply everything else
-kubectl apply -f infra/k8s/
+# 2. Apply the shared configuration and Redis cache.
+kubectl apply -f infra/k8s/01-configmap.yaml
+kubectl apply -f infra/k8s/03-redis.yaml
 
-# 3. Watch the rollout
+# 3. Run the migration once, then wait for it before starting API replicas.
+# Delete the previous completed Job so this command is repeatable for a new release.
+kubectl -n stockroom delete job stockroom-migrate --ignore-not-found
+kubectl apply -f infra/k8s/00-migration-job.yaml
+kubectl -n stockroom wait --for=condition=complete job/stockroom-migrate --timeout=180s
+
+# 4. Start the API, autoscaling, and ingress after the schema is ready.
+kubectl apply -f infra/k8s/04-api.yaml
+kubectl apply -f infra/k8s/05-hpa.yaml
+kubectl apply -f infra/k8s/06-ingress.yaml
 kubectl -n stockroom rollout status deployment/stockroom-api
 ```
 
@@ -56,3 +67,6 @@ curl -s localhost:8000/health | jq .cache
   database, so a slow query never restarts a healthy pod.
 - Resource requests are deliberately small; raise them from real load data
   rather than guessing.
+- **Migrations run once per release.** API pods set `RUN_MIGRATIONS=false`; the
+  migration Job is the only workload that invokes Alembic. This prevents two
+  API replicas from racing to apply the same schema revision during rollout.

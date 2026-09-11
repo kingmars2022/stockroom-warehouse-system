@@ -13,3 +13,4 @@ data:
   REDIS_URL: "redis://stockroom-redis:6379/0"
   CACHE_TTL_SECONDS: "60"
   MAX_RECEIPT_SIZE_BYTES: "10485760"
+  RUN_MIGRATIONS: "false"

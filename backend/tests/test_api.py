@@ -128,6 +128,7 @@ def test_issuing_stock_returns_the_movement(api, employee, item):
 
     assert response.status_code == 201
     assert response.json()["quantity"] == 3
+    assert response.json()["actor_name"] == employee.name
 
 
 def test_issuing_more_than_available_is_a_conflict(api, employee, item):
@@ -163,6 +164,8 @@ def test_employees_only_see_their_own_movements(api, employee, supervisor, item,
 
     assert len(mine) == 1
     assert len(everything) == 2
+    assert mine[0]["actor_name"] == employee.name
+    assert {movement["actor_name"] for movement in everything} == {employee.name, supervisor.name}
 
 
 # --------------------------------------------------------------------------
@@ -287,6 +290,7 @@ def test_employee_can_submit_an_expense(api, employee):
 
     assert response.status_code == 201
     assert response.json()["status"] == "submitted"
+    assert response.json()["submitter_name"] == employee.name
 
 
 def test_expense_purpose_is_validated(api, employee):
@@ -302,6 +306,8 @@ def test_supervisor_can_approve_over_http(api, employee, supervisor):
 
     assert response.status_code == 200
     assert response.json()["status"] == "approved"
+    assert response.json()["submitter_name"] == employee.name
+    assert response.json()["reviewer_name"] == supervisor.name
 
 
 def test_employees_cannot_approve_over_http(api, employee):
@@ -321,6 +327,7 @@ def test_employees_only_see_their_own_expenses(api, employee, supervisor):
 
     assert len(mine) == 1
     assert len(everything) == 2
+    assert mine[0]["submitter_name"] == employee.name
 
 
 # --------------------------------------------------------------------------
@@ -334,6 +341,7 @@ def test_admin_can_read_the_audit_log(api, admin, employee, item):
 
     assert response.status_code == 200
     assert any(entry["action"] == "issued_stock" for entry in response.json())
+    assert any(entry["actor_name"] == employee.name for entry in response.json())
 
 
 def test_employees_cannot_read_the_audit_log(api, employee):

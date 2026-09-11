@@ -54,6 +54,7 @@ class MovementResponse(ORMModel):
     kind: MovementKind
     quantity: int
     actor_id: UUID
+    actor_name: str
     recipient: str
     note: str
     created_at: datetime
@@ -113,6 +114,7 @@ class ExpenseCreate(BaseModel):
 class ExpenseResponse(ORMModel):
     id: UUID
     submitter_id: UUID
+    submitter_name: str
     item_id: UUID | None
     supplier: str
     quantity: int
@@ -122,6 +124,7 @@ class ExpenseResponse(ORMModel):
     receipt_key: str | None
     status: ExpenseStatus
     reviewer_id: UUID | None
+    reviewer_name: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -160,6 +163,7 @@ class ReplenishmentRecommendation(BaseModel):
 class AuditResponse(ORMModel):
     id: UUID
     actor_id: UUID
+    actor_name: str
     actor_role: Role
     action: str
     target_type: str

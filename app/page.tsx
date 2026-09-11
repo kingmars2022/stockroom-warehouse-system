@@ -183,10 +183,10 @@ export default function Home() {
     setStore({
       items: items.map(item => ({ id: item.id, sku: item.sku, name: item.name, category: item.category, location: item.location, qty: item.quantity_on_hand, min: item.minimum_quantity, unit: item.unit })),
       suppliers: suppliers.map(supplier => ({ id: supplier.id, name: supplier.name, contact: supplier.contact, leadDays: supplier.lead_days, rating: supplier.rating, status: supplier.status })),
-      movements: movements.map(movement => ({ id: movement.id, kind: movement.kind, itemId: movement.item_id, qty: movement.quantity, actor: movement.actor_id, recipient: movement.recipient, note: movement.note, at: movement.created_at })),
+      movements: movements.map(movement => ({ id: movement.id, kind: movement.kind, itemId: movement.item_id, qty: movement.quantity, actor: movement.actor_name, recipient: movement.recipient, note: movement.note, at: movement.created_at })),
       purchases: purchases.map(purchase => ({ id: purchase.id, itemId: purchase.item_id, supplierId: purchase.supplier_id, qty: purchase.quantity, unitCost: Number(purchase.unit_cost), currency: purchase.currency, receipt: purchase.receipt_key || 'No attachment', invoice: purchase.invoice_number, at: purchase.created_at, priceChange: purchase.price_change_percent })),
-      expenses: expenses.map(expense => ({ id: expense.id, submitter: expense.submitter_id, itemId: expense.item_id || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_id || undefined })),
-      audits: audits.map(audit => ({ id: audit.id, actor: audit.actor_id, role: audit.actor_role, action: audit.action, target: audit.target_type, detail: audit.detail, at: audit.created_at })),
+      expenses: expenses.map(expense => ({ id: expense.id, submitter: expense.submitter_name, itemId: expense.item_id || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_name || undefined })),
+      audits: audits.map(audit => ({ id: audit.id, actor: audit.actor_name, role: audit.actor_role, action: audit.action, target: audit.target_type, detail: audit.detail, at: audit.created_at })),
       replenishment: replenishment.map(recommendation => ({ itemId: recommendation.item_id, itemName: recommendation.item_name, sku: recommendation.sku, unit: recommendation.unit, quantityOnHand: recommendation.quantity_on_hand, dailyUsage: recommendation.daily_usage, daysOfCover: recommendation.days_of_cover, suggestedQuantity: recommendation.suggested_quantity, recommendedSupplier: recommendation.recommended_supplier ? { supplierId: recommendation.recommended_supplier.supplier_id, supplierName: recommendation.recommended_supplier.supplier_name, unitCost: Number(recommendation.recommended_supplier.unit_cost), currency: recommendation.recommended_supplier.currency, leadDays: recommendation.recommended_supplier.lead_days, rating: recommendation.recommended_supplier.rating, score: recommendation.recommended_supplier.score } : null, alternatives: recommendation.alternatives.map((option: SupplierRecommendation) => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency, leadDays: option.lead_days, rating: option.rating, score: option.score })) })),
       threshold: policy.threshold_percent,
       defaultAppearance,
@@ -228,8 +228,8 @@ export default function Home() {
   const canReceive = user?.role !== 'employee';
   const canAudit = user?.role === 'admin';
   const canSeeActivity = user?.role !== 'employee';
-  const visibleMoves = user?.role === 'employee' ? store.movements.filter(move => move.actor === user.name) : store.movements;
-  const visibleExpenses = user?.role === 'employee' ? store.expenses.filter(expense => expense.submitter === user.name) : store.expenses;
+  const visibleMoves = localDemoAuth && user?.role === 'employee' ? store.movements.filter(move => move.actor === user.name) : store.movements;
+  const visibleExpenses = localDemoAuth && user?.role === 'employee' ? store.expenses.filter(expense => expense.submitter === user.name) : store.expenses;
   const items = useMemo(() => store.items.filter(item => `${item.name} ${item.sku} ${item.category} ${item.location}`.toLowerCase().includes(search.toLowerCase())).filter(item => !lowOnly || item.qty <= item.min), [store.items, search, lowOnly]);
   const lowStock = store.items.filter(item => item.qty <= item.min);
   const priceAlerts = store.purchases.filter(purchase => purchase.priceChange >= store.threshold);

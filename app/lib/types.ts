@@ -46,6 +46,7 @@ export interface MovementResponse {
   kind: MovementKind;
   quantity: number;
   actor_id: string;
+  actor_name: string;
   recipient: string;
   note: string;
   created_at: string;
@@ -68,6 +69,7 @@ export interface PurchaseResponse {
 export interface ExpenseResponse {
   id: string;
   submitter_id: string;
+  submitter_name: string;
   item_id: string | null;
   supplier: string;
   quantity: number;
@@ -77,6 +79,7 @@ export interface ExpenseResponse {
   receipt_key: string | null;
   status: ExpenseStatus;
   reviewer_id: string | null;
+  reviewer_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +87,7 @@ export interface ExpenseResponse {
 export interface AuditResponse {
   id: string;
   actor_id: string;
+  actor_name: string;
   actor_role: Role;
   action: string;
   target_type: string;
