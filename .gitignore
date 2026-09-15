@@ -19,6 +19,14 @@ venv/
 *.pem
 *.key
 
+# terraform: state can contain resource secrets in plaintext
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
 # local tooling
 .DS_Store
 .idea/
