@@ -348,6 +348,52 @@ def test_employees_cannot_read_the_audit_log(api, employee):
     assert api.act_as(employee).get("/api/audit-logs").status_code == 403
 
 
+def test_audit_events_expose_the_payload_the_relational_log_flattens(api, admin, employee, item):
+    api.act_as(employee).post("/api/movements", json={"item_id": str(item.id), "kind": "outbound", "quantity": 4, "recipient": "Dispatch"})
+
+    response = api.act_as(admin).get("/api/audit-events")
+
+    assert response.status_code == 200
+    event = next(entry for entry in response.json() if entry["action"] == "issued_stock")
+    assert event["payload"]["quantity"] == 4
+    assert event["payload"]["recipient"] == "Dispatch"
+    assert event["actor"]["name"] == employee.name
+    assert event["target"]["id"] == str(item.id)
+
+
+def test_audit_events_filter_on_a_field_only_one_action_has(api, admin, employee, item, supplier):
+    api.act_as(employee).post("/api/movements", json={"item_id": str(item.id), "kind": "outbound", "quantity": 4, "recipient": "Dispatch"})
+    api.act_as(admin).post("/api/purchases", json={"item_id": str(item.id), "supplier_id": str(supplier.id), "quantity": 2, "unit_cost": 10.0, "currency": "cad", "invoice_number": "INV-1"})
+
+    quantities = api.act_as(admin).get("/api/audit-events", params={"min_quantity": 4})
+    assert [entry["action"] for entry in quantities.json()] == ["issued_stock"]
+
+    by_action = api.act_as(admin).get("/api/audit-events", params={"action": "received_purchase"})
+    assert len(by_action.json()) == 1
+
+    by_role = api.act_as(admin).get("/api/audit-events", params={"actor_role": "employee"})
+    assert [entry["action"] for entry in by_role.json()] == ["issued_stock"]
+
+
+def test_audit_events_accept_a_time_window_and_a_limit(api, admin, employee, item):
+    for _ in range(3):
+        api.act_as(employee).post("/api/movements", json={"item_id": str(item.id), "kind": "outbound", "quantity": 1, "recipient": "Dispatch"})
+
+    capped = api.act_as(admin).get("/api/audit-events", params={"limit": 2})
+    assert len(capped.json()) == 2
+
+    future = api.act_as(admin).get("/api/audit-events", params={"since": "2999-01-01T00:00:00Z"})
+    assert future.json() == []
+
+
+def test_employees_cannot_read_audit_events(api, employee):
+    assert api.act_as(employee).get("/api/audit-events").status_code == 403
+
+
+def test_health_reports_the_audit_event_backend(api):
+    assert api.get("/health").json()["audit_events"]["backend"] == "memory"
+
+
 # --------------------------------------------------------------------------
 # Receipt attachments (S3 is not configured in tests)
 # --------------------------------------------------------------------------

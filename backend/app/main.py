@@ -1,8 +1,9 @@
 import re
 import uuid
+from datetime import datetime
 
 import boto3
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 from sqlalchemy.orm import Session, aliased
@@ -11,7 +12,8 @@ from .auth import get_current_user, require_roles
 from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
-from .schemas import AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .schemas import AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .audit_events import get_event_store
 from .cache import get_cache
 from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
 
@@ -77,6 +79,7 @@ def health_check() -> dict:
         "status": "ok",
         "service": "stockroom-api",
         "cache": {"backend": cache.backend_name, "ttl_seconds": cache.ttl_seconds, **cache.stats.as_dict()},
+        "audit_events": {"backend": get_event_store().name},
     }
 
 
@@ -98,7 +101,7 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User =
         item = Item(**payload.model_dump())
         db.add(item)
         db.flush()
-        write_audit(db, user, "created_item", "item", str(item.id), f"Created SKU {item.sku}")
+        write_audit(db, user, "created_item", "item", str(item.id), f"Created SKU {item.sku}", payload={"sku": item.sku, "item_name": item.name, "category": item.category, "unit": item.unit, "minimum_quantity": item.minimum_quantity})
     db.commit()
     db.refresh(item)
     invalidate_replenishment_cache()
@@ -131,7 +134,7 @@ def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), user
         supplier = Supplier(**payload.model_dump())
         db.add(supplier)
         db.flush()
-        write_audit(db, user, "created_supplier", "supplier", str(supplier.id), f"Created supplier {supplier.name}")
+        write_audit(db, user, "created_supplier", "supplier", str(supplier.id), f"Created supplier {supplier.name}", payload={"supplier_name": supplier.name, "lead_days": supplier.lead_days, "rating": float(supplier.rating), "status": supplier.status.value})
     db.commit()
     db.refresh(supplier)
     invalidate_replenishment_cache()
@@ -196,6 +199,46 @@ def list_audit_logs(_: User = Depends(require_roles(Role.admin)), db: Session = 
     actor = aliased(User)
     query = select(AuditLog, actor.name).join(actor, AuditLog.actor_id == actor.id).order_by(AuditLog.created_at.desc())
     return [audit_response(audit, actor_name) for audit, actor_name in db.execute(query).all()]
+
+
+@app.get("/api/audit-events", response_model=list[AuditEventResponse])
+def query_audit_events(
+    _: User = Depends(require_roles(Role.admin)),
+    action: str | None = None,
+    actor_role: Role | None = None,
+    target_type: str | None = None,
+    min_price_change_percent: float | None = None,
+    min_quantity: int | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Search audit events by what actually changed, not just by who and when.
+
+    `/api/audit-logs` can only filter on the columns every action shares. The
+    payload filters here reach into fields that exist for one action and not
+    another — a price rise on a purchase, a quantity on a stock move — which is
+    the reason these events are documents.
+    """
+    criteria: dict = {}
+    if action:
+        criteria["action"] = action
+    if actor_role:
+        criteria["actor.role"] = actor_role.value
+    if target_type:
+        criteria["target.type"] = target_type
+    if min_price_change_percent is not None:
+        criteria["payload.price_change_percent"] = {"$gte": min_price_change_percent}
+    if min_quantity is not None:
+        criteria["payload.quantity"] = {"$gte": min_quantity}
+    if since or until:
+        window = {}
+        if since:
+            window["$gte"] = since
+        if until:
+            window["$lte"] = until
+        criteria["created_at"] = window
+    return get_event_store().query(criteria, limit)
 
 
 @app.post("/api/attachments/presign", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)

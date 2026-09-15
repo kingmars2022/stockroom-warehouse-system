@@ -1,11 +1,13 @@
+import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import ceil
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
+from .audit_events import build_document, publish
 from .cache import REPLENISHMENT_KEY, REPLENISHMENT_PREFIX, get_cache
 from .models import AuditLog, Expense, ExpenseStatus, Item, MovementKind, Purchase, Role, StockMovement, Supplier, SupplierStatus, SystemSetting, User
 
@@ -96,8 +98,41 @@ def cached_replenishment_recommendations(db: Session) -> list[dict]:
     return get_cache().get_or_set(REPLENISHMENT_KEY, lambda: replenishment_recommendations(db))
 
 
-def write_audit(db: Session, actor: User, action: str, target_type: str, target_id: str, detail: str) -> None:
-    db.add(AuditLog(actor_id=actor.id, actor_role=actor.role, action=action, target_type=target_type, target_id=target_id, detail=detail))
+AUDIT_BUFFER_KEY = "pending_audit_events"
+
+
+def write_audit(db: Session, actor: User, action: str, target_type: str, target_id: str, detail: str, payload: dict | None = None) -> None:
+    """Record an audit entry relationally, and stage the document form of it.
+
+    The row is the system of record and lands in the caller's transaction. The
+    document is only buffered here — `_publish_audit_events` ships it once that
+    transaction commits, so a rollback leaves no orphan event behind.
+    """
+    event_id = uuid.uuid4()
+    db.add(AuditLog(id=event_id, actor_id=actor.id, actor_role=actor.role, action=action, target_type=target_type, target_id=target_id, detail=detail))
+    db.info.setdefault(AUDIT_BUFFER_KEY, []).append(
+        build_document(
+            event_id=str(event_id),
+            actor_id=str(actor.id),
+            actor_role=actor.role.value,
+            actor_name=actor.name,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail,
+            payload=payload,
+        )
+    )
+
+
+@event.listens_for(Session, "after_commit")
+def _publish_audit_events(session: Session) -> None:
+    publish(session.info.pop(AUDIT_BUFFER_KEY, []))
+
+
+@event.listens_for(Session, "after_rollback")
+def _discard_audit_events(session: Session) -> None:
+    session.info.pop(AUDIT_BUFFER_KEY, None)
 
 
 def get_price_threshold(db: Session) -> int:
@@ -116,7 +151,7 @@ def update_price_threshold(db: Session, actor: User, threshold_percent: int) -> 
     else:
         setting.value = str(threshold_percent)
         setting.updated_by_id = actor.id
-    write_audit(db, actor, "updated_price_alert_policy", "system_setting", PRICE_THRESHOLD_KEY, f"Price threshold changed from {previous}% to {threshold_percent}%")
+    write_audit(db, actor, "updated_price_alert_policy", "system_setting", PRICE_THRESHOLD_KEY, f"Price threshold changed from {previous}% to {threshold_percent}%", payload={"previous_percent": previous, "new_percent": threshold_percent})
     db.commit()
     return threshold_percent
 
@@ -133,7 +168,13 @@ def record_movement(db: Session, actor: User, item_id, kind: MovementKind, quant
         item.quantity_on_hand += quantity if kind is MovementKind.inbound else -quantity
         movement = StockMovement(item_id=item.id, kind=kind, quantity=quantity, actor_id=actor.id, recipient=recipient, note=note)
         db.add(movement)
-        write_audit(db, actor, "received_stock" if kind is MovementKind.inbound else "issued_stock", "item", str(item.id), f"{quantity} {item.unit} {'received from' if kind is MovementKind.inbound else 'issued to'} {recipient}")
+        write_audit(
+            db, actor,
+            "received_stock" if kind is MovementKind.inbound else "issued_stock",
+            "item", str(item.id),
+            f"{quantity} {item.unit} {'received from' if kind is MovementKind.inbound else 'issued to'} {recipient}",
+            payload={"item_id": str(item.id), "item_name": item.name, "kind": kind.value, "quantity": quantity, "unit": item.unit, "recipient": recipient, "quantity_on_hand_after": item.quantity_on_hand},
+        )
     db.commit()
     db.refresh(movement)
     invalidate_replenishment_cache()
@@ -159,7 +200,11 @@ def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: in
         db.add(purchase)
         db.flush()
         db.add(StockMovement(item_id=item.id, kind=MovementKind.inbound, quantity=quantity, actor_id=actor.id, recipient="supplier", note=f"Purchase {invoice_number or 'unreferenced'}"))
-        write_audit(db, actor, "received_purchase", "purchase", str(purchase.id), f"{quantity} {item.unit} at {unit_cost:.2f} {currency.upper()}; price change {change}%")
+        write_audit(
+            db, actor, "received_purchase", "purchase", str(purchase.id),
+            f"{quantity} {item.unit} at {unit_cost:.2f} {currency.upper()}; price change {change}%",
+            payload={"item_id": str(item.id), "item_name": item.name, "supplier_id": str(supplier_id), "quantity": quantity, "unit_cost": float(unit_cost), "previous_unit_cost": previous_cost, "price_change_percent": change, "currency": currency.upper(), "invoice_number": invoice_number},
+        )
     db.commit()
     db.refresh(purchase)
     invalidate_replenishment_cache()
@@ -174,7 +219,11 @@ def create_expense(db: Session, actor: User, **values) -> Expense:
         expense = Expense(submitter_id=actor.id, **values)
         db.add(expense)
         db.flush()
-        write_audit(db, actor, "submitted_reimbursement", "expense", str(expense.id), f"{values['amount']:.2f} {values['currency'].upper()} submitted")
+        write_audit(
+            db, actor, "submitted_reimbursement", "expense", str(expense.id),
+            f"{values['amount']:.2f} {values['currency'].upper()} submitted",
+            payload={"amount": float(values["amount"]), "currency": values["currency"].upper(), "status": ExpenseStatus.submitted.value, "has_receipt": bool(receipt_key)},
+        )
     db.commit()
     db.refresh(expense)
     return expense
@@ -193,9 +242,14 @@ def update_expense_status(db: Session, actor: User, expense_id, next_status: Exp
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an administrator can pay an approved expense")
         else:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="This status transition is not permitted")
+        previous_status = expense.status
         expense.status = next_status
         expense.reviewer_id = actor.id
-        write_audit(db, actor, f"expense_{next_status.value}", "expense", str(expense.id), f"Expense status changed to {next_status.value}")
+        write_audit(
+            db, actor, f"expense_{next_status.value}", "expense", str(expense.id),
+            f"Expense status changed to {next_status.value}",
+            payload={"amount": float(expense.amount), "currency": expense.currency, "from_status": previous_status.value, "to_status": next_status.value},
+        )
     db.commit()
     db.refresh(expense)
     return expense

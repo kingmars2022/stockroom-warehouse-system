@@ -9,12 +9,16 @@ os.environ["COGNITO_REGION"] = ""
 os.environ["COGNITO_USER_POOL_ID"] = ""
 os.environ["COGNITO_APP_CLIENT_ID"] = ""
 os.environ["RECEIPT_BUCKET_NAME"] = ""
+# Same reasoning: the suite runs against the in-memory event store, never a
+# real MongoDB. test_audit_events.py opts into a live one via MONGO_TEST_URL.
+os.environ["MONGO_URL"] = ""
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.audit_events import InMemoryEventStore, set_event_store
 from app.cache import Cache, InMemoryBackend, set_cache
 from app.db import Base
 from app.models import Item, Role, Supplier, SupplierStatus, User
@@ -40,6 +44,16 @@ def cache():
     set_cache(instance)
     yield instance
     set_cache(None)
+
+
+@pytest.fixture(autouse=True)
+def store():
+    """Same reasoning as the cache: the event store is a process-wide singleton,
+    so without this one test's audit events show up in the next one's query."""
+    instance = InMemoryEventStore()
+    set_event_store(instance)
+    yield instance
+    set_event_store(None)
 
 
 def user(db, role: Role, email: str) -> User:

@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     receipt_bucket_name: str = ""
     redis_url: str = ""
     cache_ttl_seconds: int = 60
+    mongo_url: str = ""
+    mongo_database: str = "stockroom"
     aws_region: str = "us-east-1"
     max_receipt_size_bytes: int = 10 * 1024 * 1024
 

@@ -17,13 +17,14 @@ flowchart LR
     A -->|"SELECT … FOR UPDATE"| D[("PostgreSQL<br/>8 tables")]
     A -->|"read-through cache"| R[("Redis")]
     A -->|"presigned PUT/GET"| S["S3 receipts"]
+    A -->|"publish on commit"| M[("MongoDB<br/>audit events")]
     D -.->|"writes invalidate"| R
 ```
 
 | Layer | Built with |
 |---|---|
 | API | Python, FastAPI, SQLAlchemy, Alembic |
-| Data | PostgreSQL (8 tables), Redis cache |
+| Data | PostgreSQL (8 tables), MongoDB audit events, Redis cache |
 | Auth | AWS Cognito JWT — RS256 via JWKS, groups mapped to 3 roles |
 | Console | Next.js, TypeScript, React |
 | Delivery | Docker Compose, Kubernetes, Terraform, GitHub Actions |
@@ -52,23 +53,35 @@ service falls back to an in-process cache rather than returning an error —
 and uploads directly; the key is namespaced per user and ownership is checked
 server-side before it can be attached to anything.
 
+**Audit is stored twice, on purpose.** The relational `audit_logs` row is
+written inside the same transaction as the change, so it is the system of
+record and cannot go missing. But every action flattens into one `detail`
+sentence, which makes "every purchase that rose more than 20%" unanswerable.
+The same event is therefore also published as a document whose payload keeps
+the fields that action actually has — a recipient and a quantity for a stock
+issue, a unit cost and a price delta for a purchase. Events are buffered and
+flushed on `after_commit`, so a rolled-back write publishes nothing, and an
+unreachable MongoDB degrades to an in-process buffer instead of failing the
+write. [`audit_events.py`](backend/app/audit_events.py)
+
 ## Tests
 
-159 tests, 94% statement coverage, with an 80% floor enforced in CI.
+180 tests, 94% statement coverage, with an 80% floor enforced in CI.
 
 ```
-Name              Stmts   Miss  Cover
--------------------------------------
-app/services.py     162      0   100%
-app/models.py        99      0   100%
-app/schemas.py      140      0   100%
-app/config.py        21      0   100%
-app/cache.py        141      7    95%
-app/main.py         121     20    83%
-app/auth.py          75     16    79%
-app/db.py            13      4    69%
--------------------------------------
-TOTAL               772     47    94%
+Name                  Stmts   Miss  Cover
+-----------------------------------------
+app/services.py         174      0   100%
+app/schemas.py          160      0   100%
+app/models.py            99      0   100%
+app/config.py            23      0   100%
+app/cache.py            141      7    95%
+app/audit_events.py      96      8    92%
+app/main.py             159     23    86%
+app/auth.py              75     16    79%
+app/db.py                13      4    69%
+-----------------------------------------
+TOTAL                   940     58    94%
 ```
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
@@ -82,7 +95,9 @@ POSTGRES_TEST_URL=postgresql+psycopg://stockroom:stockroom@localhost:5432/stockr
 ```
 
 CI runs it on every push, along with a second pass of the cache tests against
-a live Redis rather than the in-process fallback.
+a live Redis, and a pass of the audit-event tests against a live MongoDB —
+the in-memory stand-ins only approximate those query engines, so the real ones
+are exercised rather than assumed.
 
 Correctness and capacity are different questions — [`backend/loadtest/`](backend/loadtest)
 answers the second one by driving the real app with concurrent virtual users

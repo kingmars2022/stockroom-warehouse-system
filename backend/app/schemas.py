@@ -172,6 +172,32 @@ class AuditResponse(ORMModel):
     created_at: datetime
 
 
+class AuditEventActor(BaseModel):
+    id: str
+    role: str
+    name: str
+
+
+class AuditEventTarget(BaseModel):
+    type: str
+    id: str
+
+
+class AuditEventResponse(BaseModel):
+    """The document form of an audit entry, carrying the per-action payload
+    that the relational row flattens into one prose sentence."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(alias="_id")
+    actor: AuditEventActor
+    action: str
+    target: AuditEventTarget
+    detail: str
+    payload: dict
+    created_at: datetime
+
+
 class UploadIntent(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     content_type: str = Field(min_length=3, max_length=100)

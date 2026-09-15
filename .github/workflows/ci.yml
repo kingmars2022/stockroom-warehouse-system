@@ -49,6 +49,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -77,6 +86,15 @@ jobs:
         env:
           POSTGRES_TEST_URL: postgresql+psycopg://stockroom:stockroom@localhost:5432/stockroom_test
         run: pytest tests/test_concurrency.py --no-cov -q
+
+      # Fourth pass against a real MongoDB: the in-memory event store only
+      # approximates Mongo's query semantics, so the payload filters are run
+      # against the real query engine to stop the two quietly diverging.
+      - name: Run the audit-event tests against live MongoDB
+        working-directory: backend
+        env:
+          MONGO_TEST_URL: mongodb://localhost:27017
+        run: pytest tests/test_audit_events.py --no-cov -q
 
       - name: Upload coverage report
         if: always()

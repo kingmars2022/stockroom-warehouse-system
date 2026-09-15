@@ -28,6 +28,20 @@ services:
       timeout: 3s
       retries: 10
 
+  mongo:
+    image: mongo:7
+    # Audit events only. Unlike the cache this one is durable — the documents
+    # are the queryable record of what changed, so they get a volume.
+    ports:
+      - "27017:27017"
+    volumes:
+      - stockroom_mongo:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   api:
     build: ./backend
     env_file:
@@ -41,6 +55,8 @@ services:
       CORS_ORIGINS: http://localhost:3000
       REDIS_URL: redis://redis:6379/0
       CACHE_TTL_SECONDS: "60"
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DATABASE: stockroom
     ports:
       - "8000:8000"
     depends_on:
@@ -48,6 +64,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mongo:
+        condition: service_healthy
 
 volumes:
   stockroom_postgres:
+  stockroom_mongo:
