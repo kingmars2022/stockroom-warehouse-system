@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 60
     mongo_url: str = ""
     mongo_database: str = "stockroom"
+    # Agent provider: "gemini" (free tier), "ollama" (local), or "" to disable.
+    agent_provider: str = ""
+    agent_model: str = ""
+    gemini_api_key: str = ""
+    ollama_base_url: str = "http://localhost:11434"
     aws_region: str = "us-east-1"
     max_receipt_size_bytes: int = 10 * 1024 * 1024
 

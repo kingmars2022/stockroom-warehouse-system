@@ -12,7 +12,8 @@ from .auth import get_current_user, require_roles
 from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
-from .schemas import AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .agent import build_client, run_agent
 from .audit_events import get_event_store
 from .cache import get_cache
 from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
@@ -199,6 +200,25 @@ def list_audit_logs(_: User = Depends(require_roles(Role.admin)), db: Session = 
     actor = aliased(User)
     query = select(AuditLog, actor.name).join(actor, AuditLog.actor_id == actor.id).order_by(AuditLog.created_at.desc())
     return [audit_response(audit, actor_name) for audit, actor_name in db.execute(query).all()]
+
+
+@app.post("/api/agent/replenishment")
+def run_replenishment_agent(
+    payload: AgentRequest | None = None,
+    user: User = Depends(require_roles(Role.admin, Role.supervisor)),
+    db: Session = Depends(get_db),
+):
+    """Ask the procurement agent what to reorder.
+
+    It reads inventory and supplier data through a fixed set of tools and
+    returns proposals. It cannot place an order: approving one is a separate
+    call to `/api/purchases`, made by a person.
+    """
+    client = build_client(settings)
+    if client is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No agent provider is configured")
+    instruction = (payload.instruction if payload else None) or "What should we reorder this week?"
+    return run_agent(db, user, client, instruction).as_dict()
 
 
 @app.post("/api/supplier-prices/ingest")

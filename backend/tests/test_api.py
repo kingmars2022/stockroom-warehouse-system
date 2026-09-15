@@ -428,6 +428,34 @@ def test_ingesting_supplier_prices_reports_what_it_processed(api, admin, item, s
     assert response.json()["results"][0]["sku"] == item.sku
 
 
+def test_the_agent_endpoint_is_unavailable_without_a_provider(api, admin):
+    """No provider configured is the default, including in the local demo."""
+    assert api.act_as(admin).post("/api/agent/replenishment", json={}).status_code == 503
+
+
+def test_employees_cannot_run_the_agent(api, employee):
+    assert api.act_as(employee).post("/api/agent/replenishment", json={}).status_code == 403
+
+
+def test_the_agent_returns_proposals_without_placing_an_order(api, admin, item, supplier, monkeypatch):
+    from app import main
+    from app.agent.llm import LLMResponse, ScriptedClient, ToolCall
+
+    client = ScriptedClient([
+        LLMResponse(tool_calls=[ToolCall("propose_purchase", {"sku": item.sku, "supplier_name": supplier.name, "quantity": 12, "reason": "low cover"})]),
+        LLMResponse(text="One order proposed."),
+    ])
+    monkeypatch.setattr(main, "build_client", lambda _settings: client)
+
+    response = api.act_as(admin).post("/api/agent/replenishment", json={"instruction": "what should we reorder?"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == "One order proposed."
+    assert body["proposals"][0]["requires_human_approval"] is True
+    assert api.act_as(admin).get("/api/purchases").json() == []
+
+
 def test_health_reports_the_audit_event_backend(api):
     assert api.get("/health").json()["audit_events"]["backend"] == "memory"
 

@@ -172,6 +172,10 @@ class AuditResponse(ORMModel):
     created_at: datetime
 
 
+class AgentRequest(BaseModel):
+    instruction: str | None = Field(default=None, max_length=500)
+
+
 class AuditEventActor(BaseModel):
     id: str
     role: str

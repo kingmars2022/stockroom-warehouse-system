@@ -19,6 +19,8 @@ flowchart LR
     A -->|"presigned PUT/GET"| S["S3 receipts"]
     A -->|"publish on commit"| M[("MongoDB<br/>audit events")]
     D -.->|"writes invalidate"| R
+    A -->|"read-only tools"| AG["Procurement agent<br/>proposes only"]
+    AG -.->|"proposals for approval"| B
     SUP["Supplier systems"] -->|"HMAC-signed POST"| G["API Gateway"]
     G --> L2["Lambda<br/>price webhook"]
     L2 -->|"park submission"| S
@@ -33,6 +35,7 @@ flowchart LR
 | Auth | AWS Cognito JWT — RS256 via JWKS, groups mapped to 3 roles |
 | Console | Next.js, TypeScript, React |
 | Serverless | AWS Lambda (receipt validation, price webhook), API Gateway |
+| Agent | Tool-using procurement agent, provider-agnostic (Gemini free tier or local Ollama) |
 | Delivery | Docker Compose, Kubernetes, Terraform, GitHub Actions |
 
 ## The parts worth reading
@@ -67,6 +70,25 @@ receipt that failed — and answers 409 rather than rejecting one that has not
 been scanned yet, because validation is asynchronous.
 [`handler.py`](backend/lambdas/receipt_validator/handler.py)
 
+**The procurement agent can propose, and only propose.** Ask it what to
+reorder and it works through a fixed set of tools — what is short, what an item
+has cost, who supplies it — then drafts specific purchases with a reason for
+each. It cannot place one. Every tool is a read except `propose_purchase`,
+which validates a proposal against real SKUs and suppliers and hands it back;
+approving it is an ordinary authenticated call made by a person. The
+quantities and supplier rankings are not the model's either: the tools call the
+same replenishment engine the console uses, so the arithmetic stays in code
+where it is tested and the model decides only what to look at and how to
+explain it. The loop caps iterations, refuses tools outside the allowlist, and
+writes the whole run — every call, its arguments, the proposals — to the audit
+trail as one event.
+
+The provider sits behind a one-method interface, so the test suite drives the
+real loop and real tools with a scripted model: no API key, no network, no
+cost, and the same result every run. A free Gemini tier or a local Ollama slots
+in behind the same interface.
+[`agent/`](backend/app/agent)
+
 **Suppliers can push prices without an account, and without a route inward.**
 Price rises are only noticed today when someone records a purchase. A supplier
 can now POST a quote to an API Gateway endpoint, authenticated the way webhooks
@@ -95,24 +117,27 @@ write. [`audit_events.py`](backend/app/audit_events.py)
 
 ## Tests
 
-227 tests, 95% statement coverage, with an 80% floor enforced in CI.
+264 tests, 95% statement coverage, with an 80% floor enforced in CI.
 
 ```
 Name                                         Stmts   Miss  Cover
 -----------------------------------------------------------------
+app/agent/llm.py                                85      0   100%
+app/agent/loop.py                               53      0   100%
+app/agent/tools.py                              50      0   100%
 app/services.py                                233      0   100%
-app/schemas.py                                 160      0   100%
-app/models.py                                   99      0   100%
-app/config.py                                   23      0   100%
+app/schemas.py                                 162      0   100%
+app/models.py                                    99      0   100%
+app/config.py                                    27      0   100%
 lambdas/receipt_validator/handler.py            51      1    98%
 lambdas/supplier_price_webhook/handler.py       67      2    97%
 app/cache.py                                   141      7    95%
 app/audit_events.py                             96      8    92%
-app/main.py                                    164     23    86%
-app/auth.py                                     75     16    79%
-app/db.py                                       13      4    69%
+app/main.py                                    172     23    87%
+app/auth.py                                      75     16    79%
+app/db.py                                        13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1122     61    95%
+TOTAL                                         1327     61    95%
 ```
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
@@ -144,6 +169,21 @@ correct under the load.
 docker compose up -d          # PostgreSQL + Redis + API on :8000
 npm install && npm run dev    # console on :3000
 ```
+
+The agent is off unless a provider is configured — `/api/agent/replenishment`
+answers 503 rather than failing at request time. To switch it on, add one of
+these to `backend/.env`:
+
+```bash
+AGENT_PROVIDER=gemini          # free tier, needs a key but no card
+GEMINI_API_KEY=...
+AGENT_MODEL=gemini-2.0-flash
+
+AGENT_PROVIDER=ollama          # local, no account at all
+AGENT_MODEL=llama3.1
+```
+
+The test suite needs neither: it runs the agent against a scripted model.
 
 `backend/.env` is optional for the local demo. Copy
 [`backend/.env.example`](backend/.env.example) to `backend/.env` only when
