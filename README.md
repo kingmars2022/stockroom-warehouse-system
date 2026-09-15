@@ -107,8 +107,13 @@ inside the caller's timeout and must not lose a submission because our backend
 is down, and a route reachable from the whole internet is the last thing that
 should also hold a path to private data. `POST /api/supplier-prices/ingest`
 then drains that inbox, compares each quote against what the item actually
-last cost, and raises a price alert when the rise clears the threshold an
-administrator configured.
+last cost — only when the currencies match, since subtracting 10 USD from
+13.5 CAD produces a 35% "rise" that is an artefact of the exchange rate, not
+a real one — and raises a price alert when the rise clears the threshold an
+administrator configured. A submission is recorded as consumed in the same
+transaction as the alert, so a supplier's retry, a delete that fails after the
+commit, or two ingest calls racing the same object cannot apply the same quote
+twice.
 [`handler.py`](backend/lambdas/supplier_price_webhook/handler.py)
 
 **Audit is stored twice, on purpose.** The relational `audit_logs` row is
@@ -130,28 +135,35 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-264 tests, 95% statement coverage, with an 80% floor enforced in CI.
+277 tests, 95% statement coverage, with an 80% floor enforced in CI.
 
 ```
 Name                                         Stmts   Miss  Cover
 -----------------------------------------------------------------
-app/agent/llm.py                                85      0   100%
-app/agent/loop.py                               53      0   100%
-app/agent/tools.py                              50      0   100%
-app/services.py                                233      0   100%
-app/schemas.py                                 162      0   100%
-app/models.py                                    99      0   100%
+app/agent/__init__.py                            3      0   100%
+app/agent/loop.py                               55      0   100%
+app/models.py                                   105      0   100%
+app/schemas.py                                  162      0   100%
+app/services.py                                 242      0   100%
 app/config.py                                    27      0   100%
-lambdas/receipt_validator/handler.py            51      1    98%
-lambdas/supplier_price_webhook/handler.py       67      2    97%
-app/cache.py                                   141      7    95%
-app/audit_events.py                             96      8    92%
-app/main.py                                    172     23    87%
+lambdas/receipt_validator/handler.py             55      1    98%
+app/agent/llm.py                                 97      5    95%
+app/cache.py                                    141      7    95%
+lambdas/supplier_price_webhook/handler.py        76      4    95%
+app/agent/tools.py                               67      5    93%
+app/audit_events.py                             105     12    89%
+app/main.py                                     173     18    90%
 app/auth.py                                      75     16    79%
 app/db.py                                        13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1327     61    95%
+TOTAL                                         1396     72    95%
 ```
+
+Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
+for defects an external code review found in the four features above — the
+kind that pass because a test checks that a design works *as imagined* rather
+than what the mechanism actually does. Kept as its own file because that
+pattern is the useful part, not any single fix.
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
 means the `SELECT … FOR UPDATE` lock is never really contended there — SQLite
