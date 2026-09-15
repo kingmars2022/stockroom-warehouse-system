@@ -64,6 +64,7 @@ Stockroom converts those disconnected activities into an accountable workflow. I
 | **Amazon Cognito** | Authenticates users, verifies email addresses, manages password recovery, and supplies group claims for `admin`, `supervisor`, and `employee` roles |
 | **FastAPI** | Validates Cognito JWTs, enforces authorization, runs inventory transactions, calculates replenishment recommendations, and creates presigned attachment URLs |
 | **PostgreSQL** | Stores the operational source of truth for inventory, movements, purchases, expenses, suppliers, users, and audit logs |
+| **MongoDB** | Stores the document form of each audit entry, carrying the payload fields that particular action has, so audit can be searched by what changed and not only by who and when. Published after the PostgreSQL transaction commits; degrades to an in-process buffer when unreachable |
 | **Amazon S3** | Stores private receipts and invoices; the browser uploads through short-lived presigned URLs rather than through public file storage |
 | **Amazon ECR / App Runner** | Packages and runs the FastAPI service in the AWS deployment design |
 | **GitHub Actions** | Builds the frontend, runs API tests, and contains the API image deployment workflow |
