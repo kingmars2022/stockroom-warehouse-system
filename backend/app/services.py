@@ -3,12 +3,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import ceil
 
+import boto3
 from fastapi import HTTPException, status
 from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from .audit_events import build_document, publish
 from .cache import REPLENISHMENT_KEY, REPLENISHMENT_PREFIX, get_cache
+from .config import get_settings
 from .models import AuditLog, Expense, ExpenseStatus, Item, MovementKind, Purchase, Role, StockMovement, Supplier, SupplierStatus, SystemSetting, User
 
 
@@ -258,3 +260,33 @@ def update_expense_status(db: Session, actor: User, expense_id, next_status: Exp
 def assert_receipt_ownership(key: str, actor: User) -> None:
     if not key.startswith(f"receipts/{actor.id}/"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Receipt key does not belong to the current user")
+    assert_receipt_validated(key)
+
+
+def assert_receipt_validated(key: str) -> None:
+    """Refuse to attach a receipt the upload validator has not cleared.
+
+    The presign endpoint can only check what the client declares; the bytes go
+    straight from the browser to S3. A Lambda inspects the object on
+    ObjectCreated and tags it, and this is the gate that makes that verdict
+    mean something.
+
+    With no bucket configured (local demo, tests) there is nothing to read, so
+    the check stands aside rather than blocking the whole flow.
+    """
+    settings = get_settings()
+    if not settings.receipt_bucket_name:
+        return
+
+    try:
+        tags = boto3.client("s3", region_name=settings.aws_region).get_object_tagging(Bucket=settings.receipt_bucket_name, Key=key)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt was not found in storage")
+
+    verdict = {tag["Key"]: tag["Value"] for tag in tags.get("TagSet", [])}.get("validation")
+    if verdict is None:
+        # Validation is asynchronous, so an attach that races the upload is a
+        # retry, not a rejection.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Receipt is still being validated, retry shortly")
+    if verdict != "passed":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Receipt failed upload validation and cannot be attached")

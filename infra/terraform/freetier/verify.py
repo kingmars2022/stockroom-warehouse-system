@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+import time
 
 import boto3
 import requests
@@ -76,11 +77,35 @@ def main() -> int:
         return 1
 
     print("4. Confirming the object exists in S3...")
-    head = boto3.client("s3", region_name=region).head_object(Bucket=bucket, Key=intent["key"])
+    s3 = boto3.client("s3", region_name=region)
+    head = s3.head_object(Bucket=bucket, Key=intent["key"])
     print(f"   {head['ContentLength']} bytes, {head['ContentType']}, SSE {head.get('ServerSideEncryption')}")
 
-    print("\nVerified: real Cognito token accepted by the API, real object in S3.")
+    print("5. Waiting for the validator Lambda to tag the object...")
+    tags = wait_for_tags(s3, bucket, intent["key"])
+    if tags is None:
+        print("   FAILED: no tags after 30s — check the function's CloudWatch logs")
+        return 1
+    print(f"   validation={tags.get('validation')} detected-type={tags.get('detected-type')} reason={tags.get('reason')}")
+    if tags.get("validation") != "passed":
+        print("   FAILED: a valid PNG should have passed validation")
+        return 1
+
+    print("\nVerified: real Cognito token accepted by the API, real object in S3,")
+    print("and the S3 event triggered the Lambda that validated it.")
     return 0
+
+
+def wait_for_tags(s3, bucket: str, key: str, attempts: int = 15) -> dict | None:
+    """The Lambda runs on an S3 event, so the tags appear a moment after the
+    upload rather than with it."""
+    for _ in range(attempts):
+        tagging = s3.get_object_tagging(Bucket=bucket, Key=key)
+        tags = {tag["Key"]: tag["Value"] for tag in tagging.get("TagSet", [])}
+        if tags:
+            return tags
+        time.sleep(2)
+    return None
 
 
 if __name__ == "__main__":

@@ -15,16 +15,21 @@ It creates only two things:
 |---|---|
 | Cognito user pool, client, 3 groups | Exercises [`auth.py`](../../../backend/app/auth.py) — real RS256 tokens, real JWKS, real `cognito:groups` |
 | Private S3 bucket (SSE, CORS, public access blocked) | Exercises the presigned upload path in [`main.py`](../../../backend/app/main.py) |
+| Receipt-validator Lambda + S3 event notification | Closes a real gap: presign can only check what the client *declares*, and the browser uploads straight to S3. The function reads the first bytes on `ObjectCreated`, compares the real signature against the declared type, and tags the verdict. [`handler.py`](../../../backend/lambdas/receipt_validator/handler.py) |
 
-Those are exactly the two services the application code talks to. PostgreSQL
-stays local in Docker — the API only sees a connection string, so running it on
-RDS proves nothing the local database does not.
+Those are the services the application code actually talks to. PostgreSQL stays
+local in Docker — the API only sees a connection string, so running it on RDS
+proves nothing the local database does not.
 
 ## Cost
 
-Both services have free tiers this usage sits far inside: a handful of users
-and a few kilobytes of objects. Everything that actually costs money — RDS, NAT
-gateways, load balancers, App Runner — is excluded by design, not by luck.
+All three sit far inside free allowances at this usage: a handful of users, a
+few kilobytes of objects, and a Lambda invoked once per upload against a
+monthly allowance of a million requests. Everything that actually costs money —
+RDS, NAT gateways, load balancers, App Runner — is excluded by design, not by
+luck. The function's CloudWatch log group is created explicitly with a 7-day
+retention, because an implicitly created one keeps logs forever and is the one
+way this stack could quietly start billing.
 
 That said, free is something you confirm, not something you assume. Step 1 is
 not optional.
@@ -91,10 +96,16 @@ python verify.py --email you@example.com --password 'ChangeThis!2026'
 
 It signs in to Cognito, prints the issuer and claims off the returned token,
 sends that token to the local API, uploads a file through the presigned URL the
-API returns, and confirms the object landed in S3. Every step touches real AWS.
+API returns, confirms the object landed in S3, and then waits for the validator
+Lambda to tag it. Every step touches real AWS, and the last one proves the S3
+event actually reached the function.
 
-Screenshot the output, plus the Cognito pool and the S3 object in the console —
-that is the evidence that the integration works.
+Screenshot the output, plus the Cognito pool, the S3 object's tags, and the
+function's CloudWatch log line — that is the evidence the integration works.
+
+To see a rejection, upload something whose bytes disagree with the declared
+type; the object comes back tagged `validation=failed` and the API refuses to
+attach it.
 
 ## 6. Destroy
 

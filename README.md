@@ -49,9 +49,17 @@ service falls back to an in-process cache rather than returning an error —
 `/health` reports which backend is live and the current hit rate.
 [`cache.py`](backend/app/cache.py)
 
-**Receipts never pass through the API.** The client asks for a presigned S3 URL
-and uploads directly; the key is namespaced per user and ownership is checked
-server-side before it can be attached to anything.
+**Receipts never pass through the API — so something else has to check them.**
+The client asks for a presigned S3 URL and uploads directly; the key is
+namespaced per user and ownership is checked server-side before it can be
+attached to anything. But presign can only validate what the client *declares*,
+and the bytes go straight from the browser to S3, so nothing on the server ever
+sees them. A Lambda closes that gap: `ObjectCreated` triggers it, it reads the
+first bytes, compares the real file signature against the declared content
+type, and tags the verdict on the object. The API then refuses to attach a
+receipt that failed — and answers 409 rather than rejecting one that has not
+been scanned yet, because validation is asynchronous.
+[`handler.py`](backend/lambdas/receipt_validator/handler.py)
 
 **Audit is stored twice, on purpose.** The relational `audit_logs` row is
 written inside the same transaction as the change, so it is the system of
@@ -66,22 +74,23 @@ write. [`audit_events.py`](backend/app/audit_events.py)
 
 ## Tests
 
-180 tests, 94% statement coverage, with an 80% floor enforced in CI.
+202 tests, 94% statement coverage, with an 80% floor enforced in CI.
 
 ```
-Name                  Stmts   Miss  Cover
------------------------------------------
-app/services.py         174      0   100%
-app/schemas.py          160      0   100%
-app/models.py            99      0   100%
-app/config.py            23      0   100%
-app/cache.py            141      7    95%
-app/audit_events.py      96      8    92%
-app/main.py             159     23    86%
-app/auth.py              75     16    79%
-app/db.py                13      4    69%
------------------------------------------
-TOTAL                   940     58    94%
+Name                                    Stmts   Miss  Cover
+-----------------------------------------------------------
+app/services.py                           190      0   100%
+app/schemas.py                            160      0   100%
+app/models.py                              99      0   100%
+app/config.py                              23      0   100%
+lambdas/receipt_validator/handler.py       51      1    98%
+app/cache.py                              141      7    95%
+app/audit_events.py                        96      8    92%
+app/main.py                               159     23    86%
+app/auth.py                                75     16    79%
+app/db.py                                  13      4    69%
+-----------------------------------------------------------
+TOTAL                                    1007     59    94%
 ```
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which

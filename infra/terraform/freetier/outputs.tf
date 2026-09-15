@@ -10,6 +10,10 @@ output "cognito_client_id" {
   value = aws_cognito_user_pool_client.web.id
 }
 
+output "receipt_validator_function_name" {
+  value = aws_lambda_function.receipt_validator.function_name
+}
+
 output "cognito_issuer" {
   value = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.users.id}"
 }
