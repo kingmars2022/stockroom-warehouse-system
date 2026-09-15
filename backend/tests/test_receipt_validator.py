@@ -139,14 +139,28 @@ def test_handler_url_decodes_the_key(monkeypatch):
     assert result["results"][0]["key"] == "receipts/u1/my receipt scan.png"
 
 
-def test_handler_reports_a_failing_record_without_stranding_the_batch(monkeypatch):
-    """S3 batches records; one unreadable object must not discard the others."""
+def test_an_infrastructure_failure_is_raised_so_lambda_retries(monkeypatch):
+    """Lambda only retries an async invocation when the function raises.
+
+    Returning normally here would leave the object untagged forever, and the
+    API answering 409 on that receipt indefinitely — so a transient S3 error
+    must not be reported as a successful run.
+    """
     monkeypatch.setattr("lambdas.receipt_validator.handler._client", lambda: FakeS3(PNG, "image/png", missing=True))
+
+    with pytest.raises(RuntimeError):
+        handler(event_for())
+
+
+def test_a_file_that_fails_validation_is_a_result_not_an_error(monkeypatch):
+    """The other half of that distinction: a bad file is tagged and the run succeeds."""
+    client = FakeS3(ELF, "image/png")
+    monkeypatch.setattr("lambdas.receipt_validator.handler._client", lambda: client)
 
     result = handler(event_for())
 
     assert result["processed"] == 1
-    assert result["results"][0]["validation"] == "errored"
+    assert client.tags["validation"] == "failed"
 
 
 def test_handler_on_an_empty_event(monkeypatch):

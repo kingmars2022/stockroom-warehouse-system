@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .audit_events import build_document, publish
 from .cache import REPLENISHMENT_KEY, REPLENISHMENT_PREFIX, get_cache
 from .config import get_settings
-from .models import AuditLog, Expense, ExpenseStatus, Item, MovementKind, Purchase, Role, StockMovement, Supplier, SupplierStatus, SystemSetting, User
+from .models import AuditLog, Expense, ExpenseStatus, Item, MovementKind, ProcessedSubmission, Purchase, Role, StockMovement, Supplier, SupplierStatus, SystemSetting, User
 
 
 PRICE_THRESHOLD_KEY = "price_alert_threshold_percent"
@@ -130,6 +130,17 @@ def write_audit(db: Session, actor: User, action: str, target_type: str, target_
 
 @event.listens_for(Session, "after_commit")
 def _publish_audit_events(session: Session) -> None:
+    """Publish only when the outermost transaction commits.
+
+    `after_commit` also fires when a SAVEPOINT is released, and every business
+    function here writes its audit inside `db.begin_nested()`. Publishing on
+    that signal sends the event while the outer transaction is still open, so a
+    later failure — a constraint violation, a failed commit — leaves an event
+    describing a change that never landed. `in_nested_transaction()` is True
+    for the savepoint release and False for the real commit.
+    """
+    if session.in_nested_transaction():
+        return
     publish(session.info.pop(AUDIT_BUFFER_KEY, []))
 
 
@@ -309,9 +320,19 @@ def apply_price_submission(db: Session, actor: User, submission: dict, threshold
     if supplier is None:
         return {"sku": item.sku, "status": "unknown_supplier"}
 
+    dedup_key = f"{supplier.id}:{submission.get('submission_id') or ''}"
+    if submission.get("submission_id") and db.get(ProcessedSubmission, dedup_key) is not None:
+        return {"sku": item.sku, "status": "duplicate"}
+
     quoted = float(submission["unit_cost"])
+    currency = str(submission["currency"]).upper()
     previous = db.scalar(select(Purchase).where(Purchase.item_id == item.id).order_by(Purchase.created_at.desc()).limit(1))
-    previous_cost = float(previous.unit_cost) if previous else 0
+
+    # Only compare like with like. Subtracting 10 USD from 13.5 CAD produces a
+    # 35% "rise" that is an artefact of the exchange rate, and there is no rate
+    # stored here to convert with — so the quote is recorded, not alerted on.
+    comparable = previous is not None and previous.currency.upper() == currency
+    previous_cost = float(previous.unit_cost) if comparable else 0
     change = round(((quoted - previous_cost) / previous_cost) * 100, 1) if previous_cost else 0
     breached = bool(previous_cost) and change >= threshold
 
@@ -323,10 +344,14 @@ def apply_price_submission(db: Session, actor: User, submission: dict, threshold
         payload={
             "sku": item.sku, "item_id": str(item.id), "supplier_id": str(supplier.id), "supplier_name": supplier.name,
             "quoted_unit_cost": quoted, "previous_unit_cost": previous_cost, "price_change_percent": change,
-            "currency": str(submission["currency"]).upper(), "threshold_percent": threshold,
+            "currency": currency, "threshold_percent": threshold,
+            "previous_currency": previous.currency.upper() if previous else None,
+            "comparable": comparable,
             "threshold_breached": breached, "submission_id": submission.get("submission_id"),
         },
     )
+    if submission.get("submission_id"):
+        db.add(ProcessedSubmission(dedup_key=dedup_key, supplier_id=supplier.id, sku=item.sku))
     db.commit()
     return {"sku": item.sku, "status": "alert" if breached else "recorded", "price_change_percent": change}
 

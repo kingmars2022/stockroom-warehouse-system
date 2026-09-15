@@ -23,7 +23,7 @@ from typing import Any, Callable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Item, Purchase, Supplier
+from ..models import Item, Purchase, Supplier, SupplierStatus
 from ..services import replenishment_recommendations
 
 # JSON Schema for each tool, in the shape both providers accept.
@@ -80,10 +80,30 @@ class ToolError(Exception):
     """A tool was called with arguments that do not resolve. Fed back to the model."""
 
 
-def _replenishment_needs(db: Session, limit: int = 10, **_) -> Any:
+MAX_PROPOSAL_QUANTITY = 100_000
+
+
+def _as_int(value: Any, field: str, default: int | None = None) -> int:
+    """Coerce a model-supplied number, reporting a bad one back rather than raising.
+
+    Tool arguments come from a language model, so `{"limit": "many"}` is an
+    ordinary occurrence. It has to reach the model as a tool error it can
+    correct, not as a ValueError that ends the whole run.
+    """
+    if value in (None, "") and default is not None:
+        return default
+    if isinstance(value, bool):
+        raise ToolError(f"{field} must be a whole number")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ToolError(f"{field} must be a whole number, got {value!r}")
+
+
+def _replenishment_needs(db: Session, limit: Any = 10, **_) -> Any:
     rows = replenishment_recommendations(db)
     trimmed = []
-    for row in rows[: max(1, min(int(limit or 10), 25))]:
+    for row in rows[: max(1, min(_as_int(limit, "limit", default=10), 25))]:
         recommended = row["recommended_supplier"]
         trimmed.append({
             "sku": row["sku"], "item_name": row["item_name"], "quantity_on_hand": row["quantity_on_hand"],
@@ -118,26 +138,46 @@ def _supplier_options(db: Session, sku: str = "", **_) -> Any:
     return rows[0]["alternatives"] if rows else []
 
 
-def _propose_purchase(db: Session, sku: str = "", supplier_name: str = "", quantity: int = 0, reason: str = "", **_) -> Any:
-    """Validate the proposal against reality, then return it. Nothing is written."""
+def _propose_purchase(db: Session, sku: str = "", supplier_name: str = "", quantity: Any = 0, reason: str = "", **_) -> Any:
+    """Check the proposal against the engine's own findings, then return it.
+
+    Existence checks are not enough. The model can name a real SKU that is not
+    short, a real supplier that is paused or has never supplied it, or a
+    quantity with an extra six zeros — and the description of this system says
+    proposals are grounded in the replenishment engine. So the engine's current
+    result is the authority on all three. Nothing is written either way.
+    """
     item = db.scalar(select(Item).where(Item.sku == sku))
     if item is None:
         raise ToolError(f"No item with sku {sku!r}, so it cannot be ordered.")
     supplier = db.scalar(select(Supplier).where(Supplier.name == supplier_name))
     if supplier is None:
         raise ToolError(f"No supplier named {supplier_name!r}. Call supplier_options to see who supplies this SKU.")
-    try:
-        quantity = int(quantity)
-    except (TypeError, ValueError):
-        raise ToolError("quantity must be a whole number")
+    if supplier.status is SupplierStatus.paused:
+        raise ToolError(f"{supplier.name} is paused and cannot be ordered from.")
+
+    quantity = _as_int(quantity, "quantity")
     if quantity <= 0:
         raise ToolError("quantity must be greater than zero")
+    if quantity > MAX_PROPOSAL_QUANTITY:
+        raise ToolError(f"quantity {quantity} exceeds the {MAX_PROPOSAL_QUANTITY} cap for a single proposal.")
 
+    flagged = next((row for row in replenishment_recommendations(db) if row["sku"] == sku), None)
+    if flagged is None:
+        raise ToolError(f"{sku} is not short — replenishment_needs did not flag it, so do not order it.")
+    if supplier.id not in {option["supplier_id"] for option in flagged["alternatives"]}:
+        raise ToolError(f"{supplier.name} has never supplied {sku}. Call supplier_options for the ones that have.")
+
+    suggested = flagged["suggested_quantity"]
     return {
         "proposal": {
             "sku": item.sku, "item_name": item.name, "item_id": str(item.id),
             "supplier_name": supplier.name, "supplier_id": str(supplier.id),
             "quantity": quantity, "unit": item.unit, "reason": reason,
+            # Both numbers are shown so a reviewer can see where the model
+            # departed from the engine, instead of having to recompute it.
+            "engine_suggested_quantity": suggested,
+            "differs_from_engine": quantity != suggested,
             "requires_human_approval": True,
         }
     }

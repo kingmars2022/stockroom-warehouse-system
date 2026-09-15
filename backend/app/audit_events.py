@@ -180,11 +180,30 @@ def build_document(
 
 
 def publish(documents: list[dict[str, Any]]) -> int:
-    """Best-effort append. A broken event store must never fail a business write."""
+    """Append, degrading to memory if the store fails at runtime.
+
+    `build_event_store` only covers Mongo being unreachable at startup. A
+    server that goes away afterwards is the more common case, and until this
+    also handled it the documents were simply dropped — which is not what
+    "degrades to an in-process buffer" describes. Falling back here keeps the
+    events readable for the rest of the process's life.
+
+    A business write is never failed either way.
+    """
     if not documents:
         return 0
+    store = get_event_store()
     try:
-        return get_event_store().append(documents)
+        return store.append(documents)
+    except Exception:
+        logger.warning("Event store %r failed, falling back to memory", store.name, exc_info=True)
+
+    if isinstance(store, InMemoryEventStore):
+        return 0
+    fallback = InMemoryEventStore()
+    set_event_store(fallback)
+    try:
+        return fallback.append(documents)
     except Exception:
         logger.warning("Could not publish %d audit events", len(documents), exc_info=True)
         return 0

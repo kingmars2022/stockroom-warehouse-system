@@ -437,9 +437,17 @@ def test_employees_cannot_run_the_agent(api, employee):
     assert api.act_as(employee).post("/api/agent/replenishment", json={}).status_code == 403
 
 
-def test_the_agent_returns_proposals_without_placing_an_order(api, admin, item, supplier, monkeypatch):
+def test_the_agent_returns_proposals_without_placing_an_order(api, db, admin, item, supplier, monkeypatch):
     from app import main
     from app.agent.llm import LLMResponse, ScriptedClient, ToolCall
+    from app.models import Purchase
+
+    # A proposal is only accepted for an item the engine actually flagged, from
+    # a supplier that has actually supplied it — so the fixture has to be short
+    # and have purchase history behind it.
+    item.quantity_on_hand = 4
+    db.add(Purchase(item_id=item.id, supplier_id=supplier.id, received_by_id=admin.id, quantity=5, unit_cost=10.0, currency="CAD", invoice_number="SEED"))
+    db.commit()
 
     client = ScriptedClient([
         LLMResponse(tool_calls=[ToolCall("propose_purchase", {"sku": item.sku, "supplier_name": supplier.name, "quantity": 12, "reason": "low cover"})]),
@@ -447,13 +455,16 @@ def test_the_agent_returns_proposals_without_placing_an_order(api, admin, item, 
     ])
     monkeypatch.setattr(main, "build_client", lambda _settings: client)
 
+    before = len(api.act_as(admin).get("/api/purchases").json())
+
     response = api.act_as(admin).post("/api/agent/replenishment", json={"instruction": "what should we reorder?"})
 
     assert response.status_code == 200
     body = response.json()
     assert body["summary"] == "One order proposed."
     assert body["proposals"][0]["requires_human_approval"] is True
-    assert api.act_as(admin).get("/api/purchases").json() == []
+    # The proposal exists; no purchase was placed by it.
+    assert len(api.act_as(admin).get("/api/purchases").json()) == before
 
 
 def test_health_reports_the_audit_event_backend(api):

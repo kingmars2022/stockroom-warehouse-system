@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -40,6 +41,7 @@ SECRET = os.environ.get("WEBHOOK_SECRET", "")
 PREFIX = "price-submissions/"
 MAX_SKEW_SECONDS = int(os.environ.get("MAX_SKEW_SECONDS", 300))
 MAX_BODY_BYTES = 64 * 1024
+MAX_UNIT_COST = 1_000_000
 
 REQUIRED = ("supplier_id", "sku", "unit_cost", "currency")
 
@@ -75,13 +77,23 @@ def validate_payload(payload: dict) -> str | None:
     missing = [field for field in REQUIRED if payload.get(field) in (None, "")]
     if missing:
         return f"missing required fields: {', '.join(missing)}"
+    if isinstance(payload["unit_cost"], bool):
+        return "unit_cost must be a number"
     try:
         unit_cost = float(payload["unit_cost"])
     except (TypeError, ValueError):
         return "unit_cost must be a number"
+    # float() happily accepts "NaN" and "Infinity". Both survive a > 0 test
+    # (NaN fails every comparison), reach the price-change arithmetic, and
+    # produce alerts that mean nothing.
+    if not math.isfinite(unit_cost):
+        return "unit_cost must be a finite number"
     if unit_cost <= 0:
         return "unit_cost must be greater than zero"
-    if len(str(payload["currency"])) != 3:
+    if unit_cost > MAX_UNIT_COST:
+        return f"unit_cost must be below {MAX_UNIT_COST}"
+    currency = str(payload["currency"])
+    if len(currency) != 3 or not currency.isalpha():
         return "currency must be a 3-letter code"
     return None
 

@@ -128,6 +128,29 @@ class AuditLog(IdMixin, Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class ProcessedSubmission(Base):
+    """One row per supplier price submission that has already been applied.
+
+    The webhook's idempotency key only stops a retry from queueing a second S3
+    object. It says nothing about consumption: the object is deleted after it
+    is applied, so a supplier retrying later, a delete that fails after the
+    commit, or two ingest calls racing the same object would each raise the
+    alert again. This row is written in the same transaction as the audit
+    entry, so the record of having processed a submission cannot outlive or
+    precede its effect.
+
+    Keyed by supplier as well as submission id — two suppliers that happen to
+    pick the same idempotency key are unrelated events.
+    """
+
+    __tablename__ = "processed_submissions"
+
+    dedup_key: Mapped[str] = mapped_column(String(320), primary_key=True)
+    supplier_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    sku: Mapped[str] = mapped_column(String(80), nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class SystemSetting(Base):
     __tablename__ = "system_settings"
 

@@ -99,15 +99,28 @@ def process_record(bucket: str, key: str, client) -> dict:
 
 
 def handler(event: dict, _context=None) -> dict:
-    """S3 delivers records in batches, and one bad object must not strand the rest."""
+    """S3 delivers records in batches, and one bad object must not strand the rest.
+
+    A file that fails validation is a *result* — it gets tagged `failed` and the
+    batch carries on. S3 or IAM failing is different: nothing was tagged, so the
+    object would sit untagged forever and the API would answer 409 on it
+    indefinitely. Lambda only retries an asynchronous invocation when the
+    function *raises*, so the remaining records are processed first and then the
+    infrastructure error is re-raised to buy those retries.
+    """
     client = _client()
     results = []
+    failure: Exception | None = None
     for record in event.get("Records", []):
         bucket = record["s3"]["bucket"]["name"]
         key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
         try:
             results.append(process_record(bucket, key, client))
-        except Exception:
+        except Exception as error:
             logger.exception("could not validate %s", key)
             results.append({"key": key, "validation": "errored"})
+            failure = failure or error
+
+    if failure is not None:
+        raise failure
     return {"processed": len(results), "results": results}

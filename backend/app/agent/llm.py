@@ -94,11 +94,19 @@ class GeminiClient:
 
     @staticmethod
     def _to_content(message: dict) -> dict:
-        role = "model" if message["role"] == "assistant" else "user"
         if message["role"] == "tool":
             # Gemini carries tool output as a functionResponse part on a user turn.
             return {"role": "user", "parts": [{"functionResponse": {"name": message["name"], "response": {"result": message["content"]}}}]}
-        return {"role": role, "parts": [{"text": message["content"]}]}
+        if message["role"] == "assistant":
+            # A functionResponse is only meaningful next to the functionCall it
+            # answers, so the calls are replayed as parts of the model turn.
+            parts: list[dict] = []
+            if message.get("content"):
+                parts.append({"text": message["content"]})
+            for call in message.get("tool_calls") or []:
+                parts.append({"functionCall": {"name": call.name, "args": call.arguments}})
+            return {"role": "model", "parts": parts or [{"text": ""}]}
+        return {"role": "user", "parts": [{"text": message["content"]}]}
 
     @staticmethod
     def _from_payload(payload: dict) -> LLMResponse:
@@ -144,7 +152,13 @@ class OllamaClient:
     @staticmethod
     def _to_message(message: dict) -> dict:
         if message["role"] == "tool":
-            return {"role": "tool", "content": message["content"]}
+            return {"role": "tool", "content": message["content"], "name": message.get("name", "")}
+        if message["role"] == "assistant":
+            payload: dict = {"role": "assistant", "content": message.get("content") or ""}
+            calls = message.get("tool_calls") or []
+            if calls:
+                payload["tool_calls"] = [{"type": "function", "function": {"name": call.name, "arguments": call.arguments}} for call in calls]
+            return payload
         return {"role": message["role"], "content": message["content"]}
 
 

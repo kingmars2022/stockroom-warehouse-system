@@ -152,10 +152,14 @@ def test_publish_is_a_no_op_for_an_empty_batch(store):
     assert publish([]) == 0
 
 
-def test_publish_swallows_a_failing_store(store):
+def test_a_store_that_fails_at_runtime_degrades_to_memory(store):
+    """Startup-time fallback is not enough: Mongo usually dies later, not at boot."""
     set_event_store(BrokenEventStore())
     try:
-        assert publish([document("issued_stock", "i1", {"quantity": 1})]) == 0
+        assert publish([document("issued_stock", "i1", {"quantity": 1})]) == 1
+        # The event is still readable, and the store has switched over.
+        assert get_event_store().name == "memory"
+        assert len(get_event_store().query({}, 5)) == 1
     finally:
         set_event_store(store)
 

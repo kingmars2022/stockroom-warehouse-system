@@ -31,6 +31,8 @@ from .llm import LLMClient, LLMResponse
 from .tools import TERMINAL, TOOL_SCHEMAS, ToolError, dispatch
 
 MAX_ITERATIONS = 8
+MAX_RECORDED_STEPS = 40
+MAX_RECORDED_PROPOSALS = 25
 
 SYSTEM_PROMPT = """You are a procurement assistant for a warehouse.
 
@@ -80,7 +82,11 @@ def run_agent(db: Session, actor: User, client: LLMClient, instruction: str) -> 
             run.summary = response.text.strip()
             break
 
-        messages.append({"role": "assistant", "content": response.text or "(tool calls)"})
+        # The tool calls have to survive into the history, not just the prose.
+        # Both providers pair a result with the call that produced it; an
+        # assistant turn carrying only text leaves the next turn's tool results
+        # dangling, which a scripted client never notices and a real one does.
+        messages.append({"role": "assistant", "content": response.text, "tool_calls": response.tool_calls})
 
         for call in response.tool_calls:
             if call.name not in allowed:
@@ -121,6 +127,13 @@ def _record(db: Session, actor: User, client: LLMClient, instruction: str, run: 
             "stopped_because": run.stopped_because,
             "duration_ms": run.duration_ms,
             "proposed_skus": [proposal["sku"] for proposal in run.proposals],
+            # Counts alone cannot answer "why did it suggest that?" after the
+            # response is gone, which is the question an audit trail exists for.
+            # Bounded so one long run cannot write an unbounded document.
+            "steps": run.steps[:MAX_RECORDED_STEPS],
+            "steps_truncated": len(run.steps) > MAX_RECORDED_STEPS,
+            "proposals": run.proposals[:MAX_RECORDED_PROPOSALS],
+            "proposals_truncated": len(run.proposals) > MAX_RECORDED_PROPOSALS,
         },
     )
     db.commit()

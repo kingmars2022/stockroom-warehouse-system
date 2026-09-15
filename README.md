@@ -67,21 +67,28 @@ sees them. A Lambda closes that gap: `ObjectCreated` triggers it, it reads the
 first bytes, compares the real file signature against the declared content
 type, and tags the verdict on the object. The API then refuses to attach a
 receipt that failed — and answers 409 rather than rejecting one that has not
-been scanned yet, because validation is asynchronous.
+been scanned yet, because validation is asynchronous. The verdict is re-read on
+download too, because passing once is not permanent: the upload URL stays
+usable for its whole window, so the object behind an already-attached key can
+be replaced afterwards. (Re-reading narrows that window rather than closing it
+— object versioning, with the verified VersionId pinned at attach time, is the
+real fix and is not done here.)
 [`handler.py`](backend/lambdas/receipt_validator/handler.py)
 
 **The procurement agent can propose, and only propose.** Ask it what to
 reorder and it works through a fixed set of tools — what is short, what an item
 has cost, who supplies it — then drafts specific purchases with a reason for
 each. It cannot place one. Every tool is a read except `propose_purchase`,
-which validates a proposal against real SKUs and suppliers and hands it back;
-approving it is an ordinary authenticated call made by a person. The
-quantities and supplier rankings are not the model's either: the tools call the
-same replenishment engine the console uses, so the arithmetic stays in code
-where it is tested and the model decides only what to look at and how to
-explain it. The loop caps iterations, refuses tools outside the allowlist, and
-writes the whole run — every call, its arguments, the proposals — to the audit
-trail as one event.
+which checks a proposal against the engine's own current findings and hands it
+back; approving it is an ordinary authenticated call made by a person.
+Existence checks are not enough there: a real SKU that is not short, a real
+supplier that is paused or has never supplied it, and a quantity with an extra
+six zeros are all things a model will produce, so the engine's result is the
+authority on all three, and a proposal that departs from its suggested quantity
+says so in the response. The loop caps iterations, refuses tools outside the
+allowlist, turns a bad argument into a tool error the model can correct rather
+than an exception that ends the run, and writes the run — each call with its
+arguments, and the proposals — to the audit trail as one event.
 
 The provider sits behind a one-method interface, so the test suite drives the
 real loop and real tools with a scripted model: no API key, no network, no
@@ -110,10 +117,16 @@ record and cannot go missing. But every action flattens into one `detail`
 sentence, which makes "every purchase that rose more than 20%" unanswerable.
 The same event is therefore also published as a document whose payload keeps
 the fields that action actually has — a recipient and a quantity for a stock
-issue, a unit cost and a price delta for a purchase. Events are buffered and
-flushed on `after_commit`, so a rolled-back write publishes nothing, and an
-unreachable MongoDB degrades to an in-process buffer instead of failing the
-write. [`audit_events.py`](backend/app/audit_events.py)
+issue, a unit cost and a price delta for a purchase.
+
+Events are buffered on the session and flushed only when the **outermost**
+transaction commits. That distinction is the whole trick: `after_commit` also
+fires when a SAVEPOINT is released, and every write here happens inside
+`db.begin_nested()`, so publishing on the first signal sends the event while
+the outer transaction is still open — and a later failure leaves an event
+describing a change that never landed. A MongoDB that is unreachable at
+startup *or* fails later degrades to an in-process buffer rather than failing
+the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py)
 
 ## Tests
 

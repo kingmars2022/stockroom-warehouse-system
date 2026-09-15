@@ -16,7 +16,7 @@ from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCre
 from .agent import build_client, run_agent
 from .audit_events import get_event_store
 from .cache import get_cache
-from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
+from .services import assert_receipt_validated, cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
 
 settings = get_settings()
 
@@ -301,6 +301,11 @@ def create_download_intent(key: str, db: Session = Depends(get_db), user: User =
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Employees cannot view purchase receipts")
     if expense is not None and user.role is Role.employee and expense.submitter_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot view another employee's receipt")
+    # Passing validation once is not permanent: the upload URL stays usable for
+    # its full window, so the object behind an already-attached key can be
+    # replaced afterwards. Re-reading the verdict here means a replacement that
+    # failed validation stops being downloadable.
+    assert_receipt_validated(key)
     client = boto3.client("s3", region_name=settings.aws_region)
     download_url = client.generate_presigned_url("get_object", Params={"Bucket": settings.receipt_bucket_name, "Key": key}, ExpiresIn=300)
     return {"download_url": download_url, "expires_in_seconds": 300}
