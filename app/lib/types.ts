@@ -122,3 +122,64 @@ export interface ReplenishmentResponse {
 export interface PricePolicyResponse {
   threshold_percent: number;
 }
+
+export interface AgentProposal {
+  sku: string;
+  item_name: string;
+  item_id: string;
+  supplier_name: string;
+  supplier_id: string;
+  quantity: number;
+  unit: string;
+  reason: string;
+  engine_suggested_quantity: number;
+  differs_from_engine: boolean;
+  requires_human_approval: boolean;
+}
+
+export interface AgentStep {
+  iteration: number;
+  tool: string;
+  arguments: Record<string, unknown>;
+  ok: boolean;
+}
+
+export interface AgentRunResponse {
+  summary: string;
+  proposals: AgentProposal[];
+  steps: AgentStep[];
+  stopped_because: string;
+  duration_ms: number;
+}
+
+export interface AuditEventActor {
+  id: string;
+  role: Role;
+  name: string;
+}
+
+export interface AuditEventTarget {
+  type: string;
+  id: string;
+}
+
+export interface AuditEventResponse {
+  id: string;
+  actor: AuditEventActor;
+  action: string;
+  target: AuditEventTarget;
+  detail: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface SupplierPriceIngestResult {
+  sku: string | null;
+  status: 'alert' | 'recorded' | 'duplicate' | 'unknown_sku' | 'unknown_supplier' | 'unreadable';
+  price_change_percent?: number;
+}
+
+export interface SupplierPriceIngestResponse {
+  processed: number;
+  results: SupplierPriceIngestResult[];
+}

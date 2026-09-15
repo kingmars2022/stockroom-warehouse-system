@@ -90,6 +90,10 @@ allowlist, turns a bad argument into a tool error the model can correct rather
 than an exception that ends the run, and writes the run — each call with its
 arguments, and the proposals — to the audit trail as one event.
 
+The console's Procurement page has a panel for it: ask a question, watch the
+tool-call trace, and "Review & approve" opens the ordinary purchase form
+pre-filled from the proposal rather than submitting anything on its own.
+
 The provider sits behind a one-method interface, so the test suite drives the
 real loop and real tools with a scripted model: no API key, no network, no
 cost, and the same result every run. A free Gemini tier or a local Ollama slots
@@ -113,7 +117,9 @@ a real one — and raises a price alert when the rise clears the threshold an
 administrator configured. A submission is recorded as consumed in the same
 transaction as the alert, so a supplier's retry, a delete that fails after the
 commit, or two ingest calls racing the same object cannot apply the same quote
-twice.
+twice. An administrator drains the inbox from the console's Procurement page —
+a "Check now" button, not a customer-facing feature — and sees each submission's
+outcome as it lands.
 [`handler.py`](backend/lambdas/supplier_price_webhook/handler.py)
 
 **Audit is stored twice, on purpose.** The relational `audit_logs` row is
@@ -122,7 +128,10 @@ record and cannot go missing. But every action flattens into one `detail`
 sentence, which makes "every purchase that rose more than 20%" unanswerable.
 The same event is therefore also published as a document whose payload keeps
 the fields that action actually has — a recipient and a quantity for a stock
-issue, a unit cost and a price delta for a purchase.
+issue, a unit cost and a price delta for a purchase. The Audit log page has a
+search panel above the relational table for exactly this — filter by action,
+minimum quantity, or minimum price change, and the matching payload fields
+show up as chips instead of a parsed sentence.
 
 Events are buffered on the session and flushed only when the **outermost**
 transaction commits. That distinction is the whole trick: `after_commit` also
