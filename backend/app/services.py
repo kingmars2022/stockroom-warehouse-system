@@ -1,3 +1,4 @@
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -255,6 +256,87 @@ def update_expense_status(db: Session, actor: User, expense_id, next_status: Exp
     db.commit()
     db.refresh(expense)
     return expense
+
+
+PRICE_SUBMISSION_PREFIX = "price-submissions/"
+
+
+def ingest_supplier_prices(db: Session, actor: User) -> list[dict]:
+    """Drain the webhook inbox and raise an alert on every material price rise.
+
+    The webhook Lambda only authenticates and parks the submission; it has no
+    route to the database and no idea what the item last cost. That comparison
+    happens here, against the same threshold an administrator sets in the
+    console, and it writes through the ordinary audit path so a supplier-pushed
+    rise is recorded exactly like one noticed during a purchase.
+
+    Each submission is deleted only after its transaction commits, so a crash
+    mid-batch leaves the rest of the inbox to be picked up next time rather
+    than silently dropping it.
+    """
+    if actor.role is not Role.admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators can ingest supplier prices")
+
+    settings = get_settings()
+    if not settings.receipt_bucket_name:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Supplier price intake is not configured")
+
+    client = boto3.client("s3", region_name=settings.aws_region)
+    listing = client.list_objects_v2(Bucket=settings.receipt_bucket_name, Prefix=PRICE_SUBMISSION_PREFIX)
+    threshold = get_price_threshold(db)
+
+    results = []
+    for entry in listing.get("Contents", []):
+        key = entry["Key"]
+        try:
+            submission = json.loads(client.get_object(Bucket=settings.receipt_bucket_name, Key=key)["Body"].read())
+        except Exception:
+            results.append({"key": key, "status": "unreadable"})
+            continue
+
+        results.append(apply_price_submission(db, actor, submission, threshold))
+        client.delete_object(Bucket=settings.receipt_bucket_name, Key=key)
+
+    return results
+
+
+def apply_price_submission(db: Session, actor: User, submission: dict, threshold: int) -> dict:
+    item = db.scalar(select(Item).where(Item.sku == submission.get("sku")))
+    if item is None:
+        return {"sku": submission.get("sku"), "status": "unknown_sku"}
+
+    supplier = db.get(Supplier, uuid.UUID(submission["supplier_id"])) if _is_uuid(submission.get("supplier_id")) else None
+    if supplier is None:
+        return {"sku": item.sku, "status": "unknown_supplier"}
+
+    quoted = float(submission["unit_cost"])
+    previous = db.scalar(select(Purchase).where(Purchase.item_id == item.id).order_by(Purchase.created_at.desc()).limit(1))
+    previous_cost = float(previous.unit_cost) if previous else 0
+    change = round(((quoted - previous_cost) / previous_cost) * 100, 1) if previous_cost else 0
+    breached = bool(previous_cost) and change >= threshold
+
+    write_audit(
+        db, actor,
+        "supplier_price_alert" if breached else "supplier_price_quoted",
+        "item", str(item.id),
+        f"{supplier.name} quoted {quoted:.2f} {str(submission['currency']).upper()} for {item.sku}; change {change}%",
+        payload={
+            "sku": item.sku, "item_id": str(item.id), "supplier_id": str(supplier.id), "supplier_name": supplier.name,
+            "quoted_unit_cost": quoted, "previous_unit_cost": previous_cost, "price_change_percent": change,
+            "currency": str(submission["currency"]).upper(), "threshold_percent": threshold,
+            "threshold_breached": breached, "submission_id": submission.get("submission_id"),
+        },
+    )
+    db.commit()
+    return {"sku": item.sku, "status": "alert" if breached else "recorded", "price_change_percent": change}
+
+
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def assert_receipt_ownership(key: str, actor: User) -> None:

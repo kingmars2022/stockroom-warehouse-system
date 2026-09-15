@@ -16,6 +16,7 @@ It creates only two things:
 | Cognito user pool, client, 3 groups | Exercises [`auth.py`](../../../backend/app/auth.py) — real RS256 tokens, real JWKS, real `cognito:groups` |
 | Private S3 bucket (SSE, CORS, public access blocked) | Exercises the presigned upload path in [`main.py`](../../../backend/app/main.py) |
 | Receipt-validator Lambda + S3 event notification | Closes a real gap: presign can only check what the client *declares*, and the browser uploads straight to S3. The function reads the first bytes on `ObjectCreated`, compares the real signature against the declared type, and tags the verdict. [`handler.py`](../../../backend/lambdas/receipt_validator/handler.py) |
+| API Gateway (HTTP API) + price-webhook Lambda | Lets suppliers push price quotes without a Cognito account. HMAC-signed, throttled, write-only into its own S3 prefix, and with no route to the database. [`handler.py`](../../../backend/lambdas/supplier_price_webhook/handler.py) |
 
 Those are the services the application code actually talks to. PostgreSQL stays
 local in Docker — the API only sees a connection string, so running it on RDS
@@ -23,13 +24,23 @@ proves nothing the local database does not.
 
 ## Cost
 
-All three sit far inside free allowances at this usage: a handful of users, a
-few kilobytes of objects, and a Lambda invoked once per upload against a
-monthly allowance of a million requests. Everything that actually costs money —
-RDS, NAT gateways, load balancers, App Runner — is excluded by design, not by
-luck. The function's CloudWatch log group is created explicitly with a 7-day
-retention, because an implicitly created one keeps logs forever and is the one
-way this stack could quietly start billing.
+Everything here sits far inside free allowances at this usage: a handful of
+users, a few kilobytes of objects, and Lambda invocations against a monthly
+allowance of a million requests. Everything that actually costs money — RDS,
+NAT gateways, load balancers, App Runner — is excluded by design, not by luck.
+
+Two deliberate choices keep it that way:
+
+* Both functions declare their CloudWatch log group explicitly with a 7-day
+  retention. An implicitly created group keeps logs forever, and that is the
+  likeliest way this stack could quietly start billing.
+* The webhook's shared secret is a Terraform-generated value passed as an
+  environment variable rather than a Secrets Manager entry, because Secrets
+  Manager bills per secret per month. Production should use it; a stack whose
+  whole point is costing nothing should not.
+
+The API Gateway stage sets a request throttle. A public endpoint with no limit
+is a way to be billed by strangers.
 
 That said, free is something you confirm, not something you assume. Step 1 is
 not optional.
@@ -107,7 +118,37 @@ To see a rejection, upload something whose bytes disagree with the declared
 type; the object comes back tagged `validation=failed` and the API refuses to
 attach it.
 
-## 6. Destroy
+## 6. Exercise the supplier price webhook
+
+```bash
+URL=$(terraform output -raw supplier_price_webhook_url)
+SECRET=$(terraform output -raw webhook_secret)
+BODY='{"supplier_id":"<a real supplier uuid>","sku":"<a real sku>","unit_cost":13.75,"currency":"CAD"}'
+STAMP=$(date +%s)
+SIG=$(printf '%s.%s' "$STAMP" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+
+curl -sS -X POST "$URL" \
+    -H "content-type: application/json" \
+    -H "x-stockroom-timestamp: $STAMP" \
+    -H "x-stockroom-signature: v1=$SIG" \
+    -d "$BODY"
+```
+
+A correct signature returns `202` with a submission id. Change one character of
+the body without re-signing and it returns `401` — worth doing once, because
+that is the control the endpoint rests on.
+
+Then drain the inbox from the API (as an admin):
+
+```bash
+curl -sS -X POST localhost:8000/api/supplier-prices/ingest -H "Authorization: Bearer $TOKEN"
+```
+
+A quote more than the configured threshold above the item's last purchase price
+comes back as `"status": "alert"` and shows up in `/api/audit-events` as
+`supplier_price_alert`.
+
+## 7. Destroy
 
 ```bash
 terraform destroy

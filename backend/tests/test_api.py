@@ -390,6 +390,44 @@ def test_employees_cannot_read_audit_events(api, employee):
     assert api.act_as(employee).get("/api/audit-events").status_code == 403
 
 
+def test_only_admins_can_ingest_supplier_prices(api, employee):
+    assert api.act_as(employee).post("/api/supplier-prices/ingest").status_code == 403
+
+
+def test_ingesting_supplier_prices_reports_what_it_processed(api, admin, item, supplier, monkeypatch):
+    import json as _json
+
+    from app import services
+
+    class _Body:
+        def __init__(self, data):
+            self._data = data
+
+        def read(self):
+            return self._data
+
+    submission = _json.dumps({"sku": item.sku, "supplier_id": str(supplier.id), "unit_cost": 9.99, "currency": "cad"}).encode()
+
+    class _S3:
+        def list_objects_v2(self, Bucket, Prefix):
+            return {"Contents": [{"Key": "price-submissions/a.json"}]}
+
+        def get_object(self, Bucket, Key):
+            return {"Body": _Body(submission)}
+
+        def delete_object(self, Bucket, Key):
+            pass
+
+    monkeypatch.setattr(services.get_settings(), "receipt_bucket_name", "test-bucket", raising=False)
+    monkeypatch.setattr(services.boto3, "client", lambda *args, **kwargs: _S3())
+
+    response = api.act_as(admin).post("/api/supplier-prices/ingest")
+
+    assert response.status_code == 200
+    assert response.json()["processed"] == 1
+    assert response.json()["results"][0]["sku"] == item.sku
+
+
 def test_health_reports_the_audit_event_backend(api):
     assert api.get("/health").json()["audit_events"]["backend"] == "memory"
 

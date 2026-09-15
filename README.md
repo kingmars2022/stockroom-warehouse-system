@@ -19,6 +19,11 @@ flowchart LR
     A -->|"presigned PUT/GET"| S["S3 receipts"]
     A -->|"publish on commit"| M[("MongoDB<br/>audit events")]
     D -.->|"writes invalidate"| R
+    SUP["Supplier systems"] -->|"HMAC-signed POST"| G["API Gateway"]
+    G --> L2["Lambda<br/>price webhook"]
+    L2 -->|"park submission"| S
+    S -->|"ObjectCreated"| L1["Lambda<br/>receipt validator"]
+    L1 -.->|"tags verdict"| S
 ```
 
 | Layer | Built with |
@@ -27,6 +32,7 @@ flowchart LR
 | Data | PostgreSQL (8 tables), MongoDB audit events, Redis cache |
 | Auth | AWS Cognito JWT — RS256 via JWKS, groups mapped to 3 roles |
 | Console | Next.js, TypeScript, React |
+| Serverless | AWS Lambda (receipt validation, price webhook), API Gateway |
 | Delivery | Docker Compose, Kubernetes, Terraform, GitHub Actions |
 
 ## The parts worth reading
@@ -61,6 +67,21 @@ receipt that failed — and answers 409 rather than rejecting one that has not
 been scanned yet, because validation is asynchronous.
 [`handler.py`](backend/lambdas/receipt_validator/handler.py)
 
+**Suppliers can push prices without an account, and without a route inward.**
+Price rises are only noticed today when someone records a purchase. A supplier
+can now POST a quote to an API Gateway endpoint, authenticated the way webhooks
+normally are — HMAC-SHA256 over the raw body with a shared secret, and the
+timestamp inside the signed material so a captured request cannot be replayed
+with a fresh header. The function behind it does not touch the database: it
+verifies, validates, and parks the submission in S3. A webhook has to answer
+inside the caller's timeout and must not lose a submission because our backend
+is down, and a route reachable from the whole internet is the last thing that
+should also hold a path to private data. `POST /api/supplier-prices/ingest`
+then drains that inbox, compares each quote against what the item actually
+last cost, and raises a price alert when the rise clears the threshold an
+administrator configured.
+[`handler.py`](backend/lambdas/supplier_price_webhook/handler.py)
+
 **Audit is stored twice, on purpose.** The relational `audit_logs` row is
 written inside the same transaction as the change, so it is the system of
 record and cannot go missing. But every action flattens into one `detail`
@@ -74,23 +95,24 @@ write. [`audit_events.py`](backend/app/audit_events.py)
 
 ## Tests
 
-202 tests, 94% statement coverage, with an 80% floor enforced in CI.
+227 tests, 95% statement coverage, with an 80% floor enforced in CI.
 
 ```
-Name                                    Stmts   Miss  Cover
------------------------------------------------------------
-app/services.py                           190      0   100%
-app/schemas.py                            160      0   100%
-app/models.py                              99      0   100%
-app/config.py                              23      0   100%
-lambdas/receipt_validator/handler.py       51      1    98%
-app/cache.py                              141      7    95%
-app/audit_events.py                        96      8    92%
-app/main.py                               159     23    86%
-app/auth.py                                75     16    79%
-app/db.py                                  13      4    69%
------------------------------------------------------------
-TOTAL                                    1007     59    94%
+Name                                         Stmts   Miss  Cover
+-----------------------------------------------------------------
+app/services.py                                233      0   100%
+app/schemas.py                                 160      0   100%
+app/models.py                                   99      0   100%
+app/config.py                                   23      0   100%
+lambdas/receipt_validator/handler.py            51      1    98%
+lambdas/supplier_price_webhook/handler.py       67      2    97%
+app/cache.py                                   141      7    95%
+app/audit_events.py                             96      8    92%
+app/main.py                                    164     23    86%
+app/auth.py                                     75     16    79%
+app/db.py                                       13      4    69%
+-----------------------------------------------------------------
+TOTAL                                         1122     61    95%
 ```
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which

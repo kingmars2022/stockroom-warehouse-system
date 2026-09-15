@@ -15,7 +15,7 @@ from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, Stock
 from .schemas import AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
 from .audit_events import get_event_store
 from .cache import get_cache
-from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
+from .services import cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
 
 settings = get_settings()
 
@@ -199,6 +199,19 @@ def list_audit_logs(_: User = Depends(require_roles(Role.admin)), db: Session = 
     actor = aliased(User)
     query = select(AuditLog, actor.name).join(actor, AuditLog.actor_id == actor.id).order_by(AuditLog.created_at.desc())
     return [audit_response(audit, actor_name) for audit, actor_name in db.execute(query).all()]
+
+
+@app.post("/api/supplier-prices/ingest")
+def ingest_supplier_prices_endpoint(user: User = Depends(require_roles(Role.admin)), db: Session = Depends(get_db)):
+    """Drain the supplier price webhook inbox and raise alerts on real rises.
+
+    Suppliers push to an API Gateway endpoint that only authenticates and
+    parks the submission; the comparison against what the item last cost
+    happens here, where the database actually is.
+    """
+    results = ingest_supplier_prices(db, user)
+    invalidate_replenishment_cache()
+    return {"processed": len(results), "results": results}
 
 
 @app.get("/api/audit-events", response_model=list[AuditEventResponse])
