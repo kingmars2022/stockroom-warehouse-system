@@ -179,6 +179,22 @@ def build_document(
     }
 
 
+def _degrade_to_memory() -> InMemoryEventStore:
+    """Install the in-process fallback, reusing one another thread already installed.
+
+    Building a fresh store per failing caller loses events: two writes hitting a
+    dead Mongo at the same moment each construct their own buffer, the second
+    replaces the first as the process-wide store, and everything the first had
+    already accepted becomes unreachable — silently, because `publish` had
+    reported those documents as written.
+    """
+    global _store
+    with _store_lock:
+        if not isinstance(_store, InMemoryEventStore):
+            _store = InMemoryEventStore()
+        return _store
+
+
 def publish(documents: list[dict[str, Any]]) -> int:
     """Append, degrading to memory if the store fails at runtime.
 
@@ -200,10 +216,30 @@ def publish(documents: list[dict[str, Any]]) -> int:
 
     if isinstance(store, InMemoryEventStore):
         return 0
-    fallback = InMemoryEventStore()
-    set_event_store(fallback)
     try:
-        return fallback.append(documents)
+        return _degrade_to_memory().append(documents)
     except Exception:
         logger.warning("Could not publish %d audit events", len(documents), exc_info=True)
         return 0
+
+
+def query(criteria: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+    """Read, degrading the same way `publish` does.
+
+    The read path was the half of the promise that was not kept: a Mongo that
+    dies mid-life answered the audit search with a 500 instead of degrading,
+    which is the opposite of "audit querying gets worse, writes keep working".
+
+    What comes back from the fallback is necessarily partial — it holds only
+    what this process buffered. `/health` reports which backend is live, and
+    that is how an operator tells a thin result from a true one.
+    """
+    store = get_event_store()
+    try:
+        return store.query(criteria, limit)
+    except Exception:
+        logger.warning("Event store %r failed on read, falling back to memory", store.name, exc_info=True)
+
+    if isinstance(store, InMemoryEventStore):
+        return []
+    return _degrade_to_memory().query(criteria, limit)

@@ -113,7 +113,11 @@ def write_audit(db: Session, actor: User, action: str, target_type: str, target_
     """
     event_id = uuid.uuid4()
     db.add(AuditLog(id=event_id, actor_id=actor.id, actor_role=actor.role, action=action, target_type=target_type, target_id=target_id, detail=detail))
-    db.info.setdefault(AUDIT_BUFFER_KEY, []).append(
+    # Buffered against the savepoint it was written inside, so that savepoint
+    # rolling back discards its own events and leaves everything the outer
+    # transaction buffered before it alone.
+    db.info.setdefault(AUDIT_BUFFER_KEY, []).append((
+        db.get_nested_transaction(),
         build_document(
             event_id=str(event_id),
             actor_id=str(actor.id),
@@ -124,8 +128,8 @@ def write_audit(db: Session, actor: User, action: str, target_type: str, target_
             target_id=target_id,
             detail=detail,
             payload=payload,
-        )
-    )
+        ),
+    ))
 
 
 @event.listens_for(Session, "after_commit")
@@ -141,12 +145,39 @@ def _publish_audit_events(session: Session) -> None:
     """
     if session.in_nested_transaction():
         return
-    publish(session.info.pop(AUDIT_BUFFER_KEY, []))
+    publish([document for _, document in session.info.pop(AUDIT_BUFFER_KEY, [])])
 
 
-@event.listens_for(Session, "after_rollback")
-def _discard_audit_events(session: Session) -> None:
-    session.info.pop(AUDIT_BUFFER_KEY, None)
+def _buffered_within(transaction, ended) -> bool:
+    """True when an event was buffered inside `ended`, or a savepoint under it."""
+    while transaction is not None:
+        if transaction is ended:
+            return True
+        transaction = transaction.parent
+    return False
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _discard_audit_events(session: Session, previous_transaction) -> None:
+    """Discard what the transaction that just rolled back had buffered — only that.
+
+    `after_rollback` fires for a SAVEPOINT rollback as well as a real one, so
+    emptying the whole buffer there also dropped events buffered *before* the
+    savepoint opened. Those events' relational rows still commit, which left
+    `audit_logs` holding an entry the document store had never heard of — the
+    two stores are supposed to join on that id, not disagree.
+
+    `after_soft_rollback` is the variant that names which transaction ended.
+    """
+    buffered = session.info.get(AUDIT_BUFFER_KEY)
+    if not buffered:
+        return
+    if not previous_transaction.nested:
+        session.info.pop(AUDIT_BUFFER_KEY, None)
+        return
+    session.info[AUDIT_BUFFER_KEY] = [
+        entry for entry in buffered if not _buffered_within(entry[0], previous_transaction)
+    ]
 
 
 def get_price_threshold(db: Session) -> int:

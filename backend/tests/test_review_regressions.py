@@ -23,12 +23,13 @@ The recurring shapes are worth naming, because they generalise:
 """
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
-from app.audit_events import get_event_store, publish, set_event_store
+from app.audit_events import get_event_store, publish, query as query_events, set_event_store
 from app.agent.llm import GeminiClient, LLMResponse, ScriptedClient, ToolCall
 from app.agent.loop import run_agent
 from app.agent.tools import ToolError, dispatch
@@ -153,3 +154,73 @@ def test_cross_currency_prices_are_not_compared_as_same_currency(db, admin, item
     result = apply_price_submission(db, admin,
         {"sku": item.sku, "supplier_id": str(supplier.id), "unit_cost": 13.5, "currency": "CAD"}, 15)
     assert result["status"] != "alert", result
+
+
+def test_savepoint_rollback_must_not_discard_events_buffered_before_it(db, admin, store):
+    """A failed savepoint took the whole buffer with it, including events from
+    outside it whose rows still commit — leaving `audit_logs` holding an entry
+    the document store never received. The two are supposed to join on that id.
+    """
+    db.connection().exec_driver_sql("BEGIN")
+    write_audit(db, admin, "before_savepoint", "item", "x", "buffered before the savepoint opened")
+    with pytest.raises(RuntimeError):
+        with db.begin_nested():
+            write_audit(db, admin, "inside_savepoint", "item", "y", "buffered inside it")
+            raise RuntimeError("the business rule this savepoint guards failed")
+    db.commit()
+
+    committed = {row.action for row in db.scalars(select(AuditLog)).all()}
+    published = {document["action"] for document in store.query({}, 10)}
+    assert committed == {"before_savepoint"}
+    assert published == committed, "the relational log and the document store disagree"
+
+
+def test_concurrent_store_failure_must_not_drop_the_first_thread_s_events(store):
+    """Each failing writer used to build its *own* fallback and install it, so
+    the second thread's store replaced the first's and everything already
+    accepted into it became unreachable — silently, since publish() had
+    reported those documents as written.
+    """
+    import threading
+
+    class Broken:
+        name = "mongodb"
+        def append(self, documents):
+            time.sleep(0.05)
+            raise RuntimeError("Mongo disappeared under concurrent load")
+        def query(self, criteria, limit):
+            raise RuntimeError("Mongo disappeared under concurrent load")
+        def ping(self):
+            return False
+
+    set_event_store(Broken())
+    threads = [
+        threading.Thread(target=publish, args=([{"_id": f"concurrent-{n}", "action": f"action_{n}", "created_at": n}],))
+        for n in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    survived = {document["action"] for document in get_event_store().query({}, 10)}
+    assert survived == {"action_0", "action_1"}
+
+
+def test_store_failing_on_read_degrades_instead_of_erroring(store):
+    """Writes degraded to the in-process buffer; reads did not, so a Mongo that
+    died mid-life answered the audit search with a 500 — the opposite of what
+    "audit querying gets worse, writes keep working" describes.
+    """
+    class BrokenOnRead:
+        name = "mongodb"
+        def append(self, documents):
+            return len(documents)
+        def query(self, criteria, limit):
+            raise RuntimeError("Mongo disappeared after startup")
+        def ping(self):
+            return True
+
+    set_event_store(BrokenOnRead())
+    assert query_events({}, 10) == []
+    assert get_event_store().name == "memory"

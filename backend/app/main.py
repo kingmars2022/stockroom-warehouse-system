@@ -14,7 +14,7 @@ from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
 from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
 from .agent import build_client, run_agent
-from .audit_events import get_event_store
+from .audit_events import get_event_store, query as query_events
 from .cache import get_cache
 from .services import assert_receipt_validated, cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
 
@@ -271,7 +271,7 @@ def query_audit_events(
         if until:
             window["$lte"] = until
         criteria["created_at"] = window
-    return get_event_store().query(criteria, limit)
+    return query_events(criteria, limit)
 
 
 @app.post("/api/attachments/presign", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
