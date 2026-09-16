@@ -9,10 +9,11 @@ through an approval chain, and every state change lands in an audit log.
 ![Issue stock](docs/screenshots/issue-stock.png)
 ![Procurement](docs/screenshots/procurement.png)
 ![Audit log](docs/screenshots/audit-log.png)
+![Dark mode](docs/screenshots/dark-mode.png)
 
 ```mermaid
 flowchart LR
-    B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>19 endpoints"]
+    B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>22 endpoints"]
     A -->|"verify RS256 via JWKS"| C["AWS Cognito"]
     A -->|"SELECT … FOR UPDATE"| D[("PostgreSQL<br/>8 tables")]
     A -->|"read-through cache"| R[("Redis")]
@@ -94,6 +95,9 @@ The console's Procurement page has a panel for it: ask a question, watch the
 tool-call trace, and "Review & approve" opens the ordinary purchase form
 pre-filled from the proposal rather than submitting anything on its own.
 
+![Procurement agent proposing purchases](docs/screenshots/agent-proposals.png)
+![Purchase form pre-filled from an agent proposal](docs/screenshots/agent-review-approve.png)
+
 The provider sits behind a one-method interface, so the test suite drives the
 real loop and real tools with a scripted model: no API key, no network, no
 cost, and the same result every run. A free Gemini tier or a local Ollama slots
@@ -132,6 +136,8 @@ issue, a unit cost and a price delta for a purchase. The Audit log page has a
 search panel above the relational table for exactly this — filter by action,
 minimum quantity, or minimum price change, and the matching payload fields
 show up as chips instead of a parsed sentence.
+
+![Structured audit search over MongoDB event payloads](docs/screenshots/audit-search.png)
 
 Events are buffered on the session and flushed only when the **outermost**
 transaction commits. That distinction is the whole trick: `after_commit` also
