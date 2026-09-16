@@ -104,6 +104,32 @@ jobs:
           path: backend/coverage.xml
           if-no-files-found: ignore
 
+  docker-compose:
+    runs-on: ubuntu-latest
+    # The api job above installs requirements and runs pytest directly -- it
+    # never runs the container's actual entrypoint. That gap let a real bug
+    # through: alembic.ini was missing prepend_sys_path, so start.sh's bare
+    # `alembic upgrade head` failed to import app.config and crash-looped the
+    # api container on every fresh `docker compose up -d`, invisible to every
+    # other job here. This job exists to catch exactly that class of failure.
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d --build
+      - name: Wait for the API to report healthy
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then exit 0; fi
+            sleep 2
+          done
+          echo "API did not answer within 60s" >&2
+          exit 1
+      - name: Show container logs
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   manifests:
     runs-on: ubuntu-latest
     steps:
