@@ -18,6 +18,7 @@ where it can be tested.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable
 
 from sqlalchemy import select
@@ -198,4 +199,14 @@ def dispatch(db: Session, name: str, arguments: dict) -> Any:
         raise ToolError(f"No tool named {name!r}. Available: {', '.join(sorted(HANDLERS))}.")
     if not isinstance(arguments, dict):
         raise ToolError("tool arguments must be an object")
-    return handler(db, **arguments)
+    # Bound before the call, so a model that names an argument after one of
+    # this module's own parameters — `db` is the one that collides — comes back
+    # as a tool error it can correct. Calling straight through made that a
+    # TypeError, which `run_agent` does not catch: the run died and took its
+    # own audit record with it. A TypeError from inside a handler still
+    # surfaces, because that one is a real defect.
+    try:
+        bound = inspect.signature(handler).bind(db, **arguments)
+    except TypeError as error:
+        raise ToolError(f"{name} does not take those arguments: {error}")
+    return handler(*bound.args, **bound.kwargs)

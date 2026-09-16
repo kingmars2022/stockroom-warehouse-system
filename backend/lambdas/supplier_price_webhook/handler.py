@@ -28,8 +28,10 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
+from typing import Any
 
 import boto3
 
@@ -98,6 +100,15 @@ def validate_payload(payload: dict) -> str | None:
     return None
 
 
+def _key_segment(value: Any) -> str:
+    """Make a caller-supplied string safe to place in an object key.
+
+    Both halves of the key come from the request body, so neither can be
+    trusted to be a tidy identifier — or to be short.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(value))[:128] or "unknown"
+
+
 def _client():
     return boto3.client("s3")
 
@@ -125,9 +136,13 @@ def handler(event: dict, _context=None) -> dict:
         return _response(422, {"error": error})
 
     # The supplier's own id for the submission, when it sends one, makes a
-    # retry overwrite its first attempt instead of queueing a duplicate.
-    submission_id = str(payload.get("idempotency_key") or uuid.uuid4())
-    key = f"{PREFIX}{submission_id}.json"
+    # retry overwrite its first attempt instead of queueing a duplicate. It is
+    # scoped to the sender: an idempotency key is only ever unique per client,
+    # so a flat namespace let two suppliers both sending "001" overwrite each
+    # other — both acknowledged, one quote silently gone. The ingest side
+    # already dedupes per supplier; this makes the inbox agree with it.
+    submission_id = _key_segment(payload.get("idempotency_key") or uuid.uuid4())
+    key = f"{PREFIX}{_key_segment(payload['supplier_id'])}/{submission_id}.json"
 
     _client().put_object(
         Bucket=BUCKET,

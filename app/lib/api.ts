@@ -55,12 +55,23 @@ export async function withReceipt<T>(
   }
 }
 
+// "At most once" held only within a single withReceipt call. When validation
+// stayed pending past the last retry, the submission failed and the obvious
+// next move — pressing submit again — came back through here and uploaded the
+// same bytes under a second key, leaving the first object orphaned for good.
+// Keyed on the File itself, so re-reading the same input yields the same key
+// and choosing a different file does not.
+const uploadedKeys = new WeakMap<File, string>();
+
 export async function uploadReceipt(file: File): Promise<string> {
+  const existing = uploadedKeys.get(file);
+  if (existing) return existing;
   const intent = await api<{ key: string; upload_url: string }>('/api/attachments/presign', {
     method: 'POST',
     body: JSON.stringify({ filename: file.name, content_type: file.type, size_bytes: file.size }),
   });
   const response = await fetch(intent.upload_url, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
   if (!response.ok) throw new Error('Receipt upload failed.');
+  uploadedKeys.set(file, intent.key);
   return intent.key;
 }

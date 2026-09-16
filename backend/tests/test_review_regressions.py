@@ -22,6 +22,8 @@ The recurring shapes are worth naming, because they generalise:
 * **A dependency added to the file CI installs, not the one the image does.**
 """
 
+import hashlib
+import hmac
 import json
 import time
 from pathlib import Path
@@ -224,3 +226,80 @@ def test_store_failing_on_read_degrades_instead_of_erroring(store):
     set_event_store(BrokenOnRead())
     assert query_events({}, 10) == []
     assert get_event_store().name == "memory"
+
+
+def test_two_suppliers_sharing_an_idempotency_key_must_not_overwrite_each_other(monkeypatch):
+    """An idempotency key is only ever unique per client, but the inbox key was
+    flat — so two suppliers both sending "001" landed on the same object, both
+    were acknowledged, and only the later quote survived to be ingested.
+    """
+    written = {}
+
+    class FakeS3:
+        def put_object(self, Bucket, Key, Body, ContentType):
+            written[Key] = json.loads(Body)
+
+    monkeypatch.setattr(webhook, "SECRET", "shared-secret")
+    monkeypatch.setattr(webhook, "BUCKET", "review-bucket")
+    monkeypatch.setattr(webhook, "_client", lambda: FakeS3())
+
+    for supplier_id, unit_cost in (("supplier-a", 10.0), ("supplier-b", 99.0)):
+        body = json.dumps({"supplier_id": supplier_id, "sku": "BX-100", "unit_cost": unit_cost,
+                           "currency": "USD", "idempotency_key": "001"})
+        timestamp = str(int(time.time()))
+        signature = "v1=" + hmac.new(b"shared-secret", f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
+        response = webhook.handler({"body": body, "headers": {
+            "x-stockroom-timestamp": timestamp, "x-stockroom-signature": signature}})
+        assert response["statusCode"] == 202
+
+    assert len(written) == 2, "both quotes must survive, not just the later one"
+    assert {entry["unit_cost"] for entry in written.values()} == {10.0, 99.0}
+
+
+def test_supplier_inbox_key_is_not_shaped_by_the_caller(monkeypatch):
+    """Both halves of the object key come from the request body."""
+    written = {}
+
+    class FakeS3:
+        def put_object(self, Bucket, Key, Body, ContentType):
+            written[Key] = json.loads(Body)
+
+    monkeypatch.setattr(webhook, "SECRET", "shared-secret")
+    monkeypatch.setattr(webhook, "BUCKET", "review-bucket")
+    monkeypatch.setattr(webhook, "_client", lambda: FakeS3())
+
+    body = json.dumps({"supplier_id": "../../escape", "sku": "BX-100", "unit_cost": 5.0,
+                       "currency": "USD", "idempotency_key": "a/b c" + "x" * 400})
+    timestamp = str(int(time.time()))
+    signature = "v1=" + hmac.new(b"shared-secret", f"{timestamp}.{body}".encode(), hashlib.sha256).hexdigest()
+    webhook.handler({"body": body, "headers": {
+        "x-stockroom-timestamp": timestamp, "x-stockroom-signature": signature}})
+
+    # ".." carries no traversal meaning in S3 — keys are opaque strings. What
+    # matters is that a caller cannot inject a separator and write into another
+    # supplier's namespace, and cannot choose an unbounded key.
+    key = next(iter(written))
+    assert key.startswith(webhook.PREFIX)
+    assert key.removeprefix(webhook.PREFIX).count("/") == 1
+    assert " " not in key
+    assert len(key) < 300
+
+
+def test_agent_argument_colliding_with_a_handler_parameter_is_a_tool_error(db):
+    """`handler(db, **arguments)` turned a model naming an argument `db` into a
+    TypeError. run_agent only catches ToolError, so the run died — and with it
+    `_record`, which writes the audit event for the run.
+    """
+    with pytest.raises(ToolError):
+        dispatch(db, "item_detail", {"db": "supplied by the model"})
+
+
+def test_agent_run_survives_a_model_that_names_an_argument_db(db, admin, store):
+    client = ScriptedClient([
+        LLMResponse(text="", tool_calls=[ToolCall(name="item_detail", arguments={"db": "nonsense"})]),
+        LLMResponse(text="I could not read that item.", tool_calls=[]),
+    ])
+    run = run_agent(db, admin, client, "what should we reorder?")
+    assert run.summary == "I could not read that item."
+    assert run.steps[0]["ok"] is False
+    assert db.scalars(select(AuditLog).where(AuditLog.action == "agent_replenishment_run")).all()

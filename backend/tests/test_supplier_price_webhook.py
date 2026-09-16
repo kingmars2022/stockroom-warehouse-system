@@ -77,10 +77,11 @@ def test_a_correctly_signed_submission_is_accepted(monkeypatch):
     client = FakeS3()
     monkeypatch.setattr(webhook, "_client", lambda: client)
 
-    response = webhook.handler(signed(quote(idempotency_key="abc")))
+    submission = quote(idempotency_key="abc")
+    response = webhook.handler(signed(submission))
 
     assert response["statusCode"] == 202
-    assert list(client.objects) == ["price-submissions/abc.json"]
+    assert list(client.objects) == [f"price-submissions/{submission['supplier_id']}/abc.json"]
 
 
 def test_an_unsigned_request_is_rejected(monkeypatch):
@@ -162,11 +163,15 @@ def test_an_idempotency_key_makes_a_retry_overwrite_not_duplicate(monkeypatch):
     client = FakeS3()
     monkeypatch.setattr(webhook, "_client", lambda: client)
 
-    webhook.handler(signed(quote(idempotency_key="same")))
-    webhook.handler(signed(quote(idempotency_key="same", unit_cost=13.0)))
+    # Same supplier, same key: that is what a retry is. The key is scoped to the
+    # sender, so two *different* suppliers reusing "same" do not collide.
+    supplier_id = str(uuid.uuid4())
+    webhook.handler(signed(quote(supplier_id=supplier_id, idempotency_key="same")))
+    webhook.handler(signed(quote(supplier_id=supplier_id, idempotency_key="same", unit_cost=13.0)))
 
-    assert list(client.objects) == ["price-submissions/same.json"]
-    assert json.loads(client.objects["price-submissions/same.json"])["unit_cost"] == 13.0
+    key = f"price-submissions/{supplier_id}/same.json"
+    assert list(client.objects) == [key]
+    assert json.loads(client.objects[key])["unit_cost"] == 13.0
 
 
 # --------------------------------------------------------------------------
