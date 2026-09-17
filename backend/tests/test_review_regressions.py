@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import select
 
 from app.audit_events import get_event_store, publish, query as query_events, set_event_store
@@ -303,3 +304,114 @@ def test_agent_run_survives_a_model_that_names_an_argument_db(db, admin, store):
     assert run.summary == "I could not read that item."
     assert run.steps[0]["ok"] is False
     assert db.scalars(select(AuditLog).where(AuditLog.action == "agent_replenishment_run")).all()
+
+
+def test_the_validator_judges_the_version_it_was_triggered_for(monkeypatch):
+    """Every S3 call used to read "current". A second upload landing mid-run
+    therefore got sniffed under the first run's event, and the verdict was
+    written against whichever version happened to be current — a judgement of
+    one object's bytes attached to another's.
+    """
+    from tests.test_receipt_validator import ELF, PNG, FakeS3, event_for
+
+    client = FakeS3(PNG, "image/png")
+    # v1 is the good PNG the event names; v2 has already replaced it as current.
+    client.versions = {"v1": (PNG, "image/png"), "v2": (ELF, "image/png")}
+    monkeypatch.setattr(validator, "_client", lambda: client)
+
+    result = validator.handler(event_for(version_id="v1"))
+
+    assert result["results"][0]["validation"] == "passed"
+    assert client.tags_by_version["v1"]["validation"] == "passed"
+    assert "v2" not in client.tags_by_version, "the run must not tag a version it never read"
+
+
+def test_an_approved_receipt_is_served_as_the_version_that_was_approved(db, employee, monkeypatch):
+    """The dangerous replacement is not one that fails validation — it is one
+    that passes. Swapping a different, equally valid PNG behind the same key
+    got it tagged `passed` too, so the download served bytes nobody approved.
+    Pinning the version means the replacement is an object this row does not
+    point at.
+    """
+    from app import main, services
+
+    presigned = {}
+
+    class FakeS3:
+        tags_by_version = {"v1": "passed", "v2": "passed"}
+        def get_object_tagging(self, Bucket, Key, VersionId=None):
+            verdict = self.tags_by_version.get(VersionId) if VersionId else "passed"
+            return {"TagSet": [{"Key": "validation", "Value": verdict}]}
+        def generate_presigned_url(self, operation, Params, ExpiresIn):
+            presigned.update(Params)
+            return "https://example.invalid/receipt"
+
+    monkeypatch.setattr(services.get_settings(), "receipt_bucket_name", "review-bucket")
+    monkeypatch.setattr(main.settings, "receipt_bucket_name", "review-bucket")
+    monkeypatch.setattr(services.boto3, "client", lambda *args, **kwargs: FakeS3())
+    monkeypatch.setattr(main.boto3, "client", lambda *args, **kwargs: FakeS3())
+
+    key = f"receipts/{employee.id}/receipt.png"
+    services.create_expense(db, employee, supplier="Store", quantity=1, amount=10, currency="CAD",
+                            purpose="receipt test", receipt_key=key, receipt_version_id="v1")
+
+    main.create_download_intent(key=key, db=db, user=employee)
+
+    assert presigned["VersionId"] == "v1", "the approved version must be the one served"
+
+
+def test_a_receipt_attached_before_versions_were_recorded_still_downloads(db, employee, monkeypatch):
+    """Nothing was backfilled, so existing rows carry no version. They must
+    keep reading as "current", which is what they were attached under.
+    """
+    from app import main, services
+
+    presigned = {}
+
+    class FakeS3:
+        def get_object_tagging(self, Bucket, Key, VersionId=None):
+            assert VersionId is None
+            return {"TagSet": [{"Key": "validation", "Value": "passed"}]}
+        def generate_presigned_url(self, operation, Params, ExpiresIn):
+            presigned.update(Params)
+            return "https://example.invalid/receipt"
+
+    monkeypatch.setattr(services.get_settings(), "receipt_bucket_name", "review-bucket")
+    monkeypatch.setattr(main.settings, "receipt_bucket_name", "review-bucket")
+    monkeypatch.setattr(services.boto3, "client", lambda *args, **kwargs: FakeS3())
+    monkeypatch.setattr(main.boto3, "client", lambda *args, **kwargs: FakeS3())
+
+    key = f"receipts/{employee.id}/legacy.png"
+    services.create_expense(db, employee, supplier="Store", quantity=1, amount=10, currency="CAD",
+                            purpose="legacy receipt", receipt_key=key)
+
+    main.create_download_intent(key=key, db=db, user=employee)
+
+    assert "VersionId" not in presigned
+
+
+def test_the_migration_chain_applies_to_an_empty_database(tmp_path, monkeypatch):
+    """Nothing else here runs the migrations: conftest builds the schema from
+    the ORM, so the chain only ever ran in CI's docker-compose job. The initial
+    migration creates its tables from `Base.metadata` at HEAD, so every column
+    added to a model later is already present by the time that column's own
+    migration runs — which fails a fresh `alembic upgrade head` outright.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    from app.config import get_settings
+
+    # env.py resolves the URL from settings and overrides whatever the caller
+    # passes in, so the environment is the only way to aim it at a scratch db.
+    url = f"sqlite:///{tmp_path / 'chain.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    get_settings.cache_clear()
+    try:
+        command.upgrade(Config("alembic.ini"), "head")
+    finally:
+        get_settings.cache_clear()
+
+    inspector = sa.inspect(sa.create_engine(url))
+    for table in ("purchases", "expenses"):
+        assert "receipt_version_id" in {column["name"] for column in inspector.get_columns(table)}

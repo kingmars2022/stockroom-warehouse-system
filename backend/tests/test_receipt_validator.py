@@ -20,28 +20,41 @@ ELF = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
 
 
 class FakeS3:
+    """Versions are modelled because the real bucket has them: every call names
+    one, and reading a different version than the one checked is the failure
+    this guards against. `versions` holds what each version actually contains.
+    """
+
     def __init__(self, body: bytes, content_type: str, size: int | None = None, missing: bool = False):
         self.body = body
         self.content_type = content_type
         self.size = len(body) if size is None else size
         self.missing = missing
         self.tags: dict[str, str] = {}
+        self.tags_by_version: dict[str | None, dict[str, str]] = {}
+        self.versions: dict[str, tuple[bytes, str]] = {}
 
-    def head_object(self, Bucket, Key):
+    def _content(self, version_id) -> tuple[bytes, str]:
+        return self.versions.get(version_id, (self.body, self.content_type))
+
+    def head_object(self, Bucket, Key, VersionId=None):
         if self.missing:
             raise RuntimeError("NoSuchKey")
-        return {"ContentType": self.content_type, "ContentLength": self.size}
+        body, content_type = self._content(VersionId)
+        return {"ContentType": content_type, "ContentLength": self.size if body is self.body else len(body)}
 
-    def get_object(self, Bucket, Key, Range=None):
-        return {"Body": _Body(self.body)}
+    def get_object(self, Bucket, Key, Range=None, VersionId=None):
+        return {"Body": _Body(self._content(VersionId)[0])}
 
-    def put_object_tagging(self, Bucket, Key, Tagging):
+    def put_object_tagging(self, Bucket, Key, Tagging, VersionId=None):
         self.tags = {tag["Key"]: tag["Value"] for tag in Tagging["TagSet"]}
+        self.tags_by_version[VersionId] = dict(self.tags)
 
-    def get_object_tagging(self, Bucket, Key):
+    def get_object_tagging(self, Bucket, Key, VersionId=None):
         if self.missing:
             raise RuntimeError("NoSuchKey")
-        return {"TagSet": [{"Key": key, "Value": value} for key, value in self.tags.items()]}
+        tags = self.tags if VersionId is None else self.tags_by_version.get(VersionId, {})
+        return {"TagSet": [{"Key": key, "Value": value} for key, value in tags.items()]}
 
 
 class _Body:
@@ -52,8 +65,11 @@ class _Body:
         return self._data
 
 
-def event_for(key: str = "receipts/u1/abc-receipt.png", bucket: str = "b") -> dict:
-    return {"Records": [{"s3": {"bucket": {"name": bucket}, "object": {"key": key}}}]}
+def event_for(key: str = "receipts/u1/abc-receipt.png", bucket: str = "b", version_id: str | None = None) -> dict:
+    obj: dict = {"key": key}
+    if version_id:
+        obj["versionId"] = version_id
+    return {"Records": [{"s3": {"bucket": {"name": bucket}, "object": obj}}]}
 
 
 # --------------------------------------------------------------------------
@@ -115,7 +131,7 @@ def test_an_object_with_no_declared_type_is_judged_on_its_signature_alone():
 def test_process_record_tags_the_object_with_its_verdict():
     client = FakeS3(PNG, "image/png")
 
-    result = process_record("b", "receipts/u1/x.png", client)
+    result = process_record("b", "receipts/u1/x.png", None, client)
 
     assert result["validation"] == PASSED
     assert client.tags == {"validation": "passed", "detected-type": "image/png", "reason": "ok"}
@@ -124,7 +140,7 @@ def test_process_record_tags_the_object_with_its_verdict():
 def test_process_record_tags_a_failure_with_the_reason():
     client = FakeS3(ELF, "application/pdf")
 
-    process_record("b", "receipts/u1/x.pdf", client)
+    process_record("b", "receipts/u1/x.pdf", None, client)
 
     assert client.tags["validation"] == "failed"
     assert client.tags["reason"] == "unrecognised-file-signature"

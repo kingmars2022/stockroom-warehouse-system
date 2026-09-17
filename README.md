@@ -68,12 +68,20 @@ sees them. A Lambda closes that gap: `ObjectCreated` triggers it, it reads the
 first bytes, compares the real file signature against the declared content
 type, and tags the verdict on the object. The API then refuses to attach a
 receipt that failed — and answers 409 rather than rejecting one that has not
-been scanned yet, because validation is asynchronous. The verdict is re-read on
-download too, because passing once is not permanent: the upload URL stays
-usable for its whole window, so the object behind an already-attached key can
-be replaced afterwards. (Re-reading narrows that window rather than closing it
-— object versioning, with the verified VersionId pinned at attach time, is the
-real fix and is not done here.)
+been scanned yet, because validation is asynchronous.
+
+Passing once is not permanent, though, and that is the harder half. The
+presigned PUT stays usable for its whole window, so the bytes behind an
+already-attached key can be replaced afterwards — and the dangerous
+replacement is not one that fails validation but one that *passes*, because a
+different, equally valid PDF gets tagged `passed` too and is then served in
+place of the document somebody approved. Re-reading the verdict on download
+cannot catch that, since there is nothing wrong with the new object. So a
+receipt is attached by version rather than by key: the bucket is versioned,
+the validator judges and tags the exact version its event names instead of
+whatever is current, the version that passed is pinned on the row at attach
+time, and downloads are presigned for that version. A replacement becomes a
+new version the row does not point at.
 [`handler.py`](backend/lambdas/receipt_validator/handler.py)
 
 **The procurement agent can propose, and only propose.** Ask it what to
@@ -150,28 +158,28 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-277 tests, 95% statement coverage, with an 80% floor enforced in CI.
+288 tests, 95% statement coverage, with an 80% floor enforced in CI.
 
 ```
 Name                                         Stmts   Miss  Cover
 -----------------------------------------------------------------
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
-app/models.py                                   105      0   100%
-app/schemas.py                                  162      0   100%
-app/services.py                                 242      0   100%
+app/models.py                                   107      0   100%
+app/schemas.py                                  164      0   100%
 app/config.py                                    27      0   100%
-lambdas/receipt_validator/handler.py             55      1    98%
+app/services.py                                 257      1    99%
+lambdas/receipt_validator/handler.py             59      1    98%
 app/agent/llm.py                                 97      5    95%
 app/cache.py                                    141      7    95%
-lambdas/supplier_price_webhook/handler.py        76      4    95%
-app/agent/tools.py                               67      5    93%
-app/audit_events.py                             105     12    89%
-app/main.py                                     173     18    90%
+lambdas/supplier_price_webhook/handler.py        80      4    95%
+app/agent/tools.py                               72      5    93%
+app/main.py                                     177     15    92%
+app/audit_events.py                             117     15    87%
 app/auth.py                                      75     16    79%
 app/db.py                                        13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1396     72    95%
+TOTAL                                         1444     73    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))

@@ -24,6 +24,18 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "receipts" {
   }
 }
 
+# A receipt is attached by version, not by key. The presigned PUT stays usable
+# for its whole window, so without versioning the bytes behind an already
+# validated key can be replaced afterwards; with it, a replacement is a new
+# version that the attached row does not point at.
+resource "aws_s3_bucket_versioning" "receipts" {
+  bucket = aws_s3_bucket.receipts.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "receipts" {
   bucket = aws_s3_bucket.receipts.id
 
@@ -31,6 +43,9 @@ resource "aws_s3_bucket_cors_configuration" "receipts" {
     allowed_methods = ["PUT"]
     allowed_origins = var.frontend_origins
     allowed_headers = ["content-type"]
+    # The browser uploads straight to S3, so this response header is the only
+    # way the client learns which version it just created.
+    expose_headers  = ["x-amz-version-id"]
     max_age_seconds = 300
   }
 }
@@ -46,6 +61,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "receipts" {
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
+    }
+  }
+
+  # Versioning keeps every superseded upload forever otherwise. Nothing reads a
+  # noncurrent version except an audit of a replacement, so they age out.
+  rule {
+    id     = "expire-noncurrent-receipts"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
     }
   }
 }

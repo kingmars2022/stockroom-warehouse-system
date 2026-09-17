@@ -97,6 +97,10 @@ class Purchase(IdMixin, Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     invoice_number: Mapped[str] = mapped_column(String(120), default="")
     receipt_key: Mapped[str | None] = mapped_column(String(512))
+    # The version that passed validation. A key on its own names whatever is
+    # current, and the upload URL stays usable for its whole window, so the
+    # bytes behind an attached key can be replaced after it was checked.
+    receipt_version_id: Mapped[str | None] = mapped_column(String(256))
     price_change_percent: Mapped[float] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -112,6 +116,7 @@ class Expense(IdMixin, TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
     receipt_key: Mapped[str | None] = mapped_column(String(512))
+    receipt_version_id: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[ExpenseStatus] = mapped_column(Enum(ExpenseStatus, name="expense_status"), default=ExpenseStatus.submitted)
     reviewer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
 

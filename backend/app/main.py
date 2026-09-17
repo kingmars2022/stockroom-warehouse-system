@@ -301,11 +301,17 @@ def create_download_intent(key: str, db: Session = Depends(get_db), user: User =
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Employees cannot view purchase receipts")
     if expense is not None and user.role is Role.employee and expense.submitter_id != user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot view another employee's receipt")
-    # Passing validation once is not permanent: the upload URL stays usable for
-    # its full window, so the object behind an already-attached key can be
-    # replaced afterwards. Re-reading the verdict here means a replacement that
-    # failed validation stops being downloadable.
-    assert_receipt_validated(key)
+    # Served as the version that was checked, not as whatever is current. The
+    # presigned PUT stays usable for its full window, so the bytes behind an
+    # attached key can be replaced after the fact; re-reading the verdict alone
+    # only narrows that window, because a replacement is unreviewed until the
+    # validator catches up. Pinning the version means the replacement is a
+    # different object that this row does not point at.
+    version_id = (purchase or expense).receipt_version_id
+    assert_receipt_validated(key, version_id)
     client = boto3.client("s3", region_name=settings.aws_region)
-    download_url = client.generate_presigned_url("get_object", Params={"Bucket": settings.receipt_bucket_name, "Key": key}, ExpiresIn=300)
+    params = {"Bucket": settings.receipt_bucket_name, "Key": key}
+    if version_id:
+        params["VersionId"] = version_id
+    download_url = client.generate_presigned_url("get_object", Params=params, ExpiresIn=300)
     return {"download_url": download_url, "expires_in_seconds": 300}

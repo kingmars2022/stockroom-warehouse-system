@@ -40,13 +40,13 @@ const RECEIPT_PENDING = /still being validated/i;
  */
 export async function withReceipt<T>(
   file: File | undefined,
-  send: (receiptKey?: string) => Promise<T>,
+  send: (receipt?: UploadedReceipt) => Promise<T>,
   attempts = 4,
 ): Promise<T> {
-  const receiptKey = file?.name ? await uploadReceipt(file) : undefined;
+  const receipt = file?.name ? await uploadReceipt(file) : undefined;
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await send(receiptKey);
+      return await send(receipt);
     } catch (error) {
       const pending = error instanceof ApiError && error.status === 409 && RECEIPT_PENDING.test(error.message);
       if (!pending || attempt >= attempts) throw error;
@@ -55,16 +55,24 @@ export async function withReceipt<T>(
   }
 }
 
+/**
+ * A key alone names whatever is currently behind it. The version identifies
+ * the bytes that were actually uploaded, so the verdict the validator reaches
+ * can be pinned to them — see assert_receipt_validated in services.py. It is
+ * absent on a bucket without versioning, which the API treats as "current".
+ */
+export type UploadedReceipt = { key: string; versionId?: string };
+
 // "At most once" held only within a single withReceipt call. When validation
 // stayed pending past the last retry, the submission failed and the obvious
 // next move — pressing submit again — came back through here and uploaded the
 // same bytes under a second key, leaving the first object orphaned for good.
 // Keyed on the File itself, so re-reading the same input yields the same key
 // and choosing a different file does not.
-const uploadedKeys = new WeakMap<File, string>();
+const uploaded = new WeakMap<File, UploadedReceipt>();
 
-export async function uploadReceipt(file: File): Promise<string> {
-  const existing = uploadedKeys.get(file);
+export async function uploadReceipt(file: File): Promise<UploadedReceipt> {
+  const existing = uploaded.get(file);
   if (existing) return existing;
   const intent = await api<{ key: string; upload_url: string }>('/api/attachments/presign', {
     method: 'POST',
@@ -72,6 +80,9 @@ export async function uploadReceipt(file: File): Promise<string> {
   });
   const response = await fetch(intent.upload_url, { method: 'PUT', headers: { 'Content-Type': file.type }, body: file });
   if (!response.ok) throw new Error('Receipt upload failed.');
-  uploadedKeys.set(file, intent.key);
-  return intent.key;
+  // Readable only because the bucket's CORS config exposes it — see the
+  // receipts CORS rule in infra/terraform/main.tf.
+  const receipt = { key: intent.key, versionId: response.headers.get('x-amz-version-id') || undefined };
+  uploaded.set(file, receipt);
+  return receipt;
 }

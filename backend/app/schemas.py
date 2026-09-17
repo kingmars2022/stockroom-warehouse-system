@@ -85,6 +85,7 @@ class PurchaseCreate(BaseModel):
     currency: str = Field(default="USD", min_length=3, max_length=3)
     invoice_number: str = Field(default="", max_length=120)
     receipt_key: str | None = Field(default=None, max_length=512)
+    receipt_version_id: str | None = Field(default=None, max_length=256)
 
 
 class PurchaseResponse(ORMModel):
@@ -109,6 +110,7 @@ class ExpenseCreate(BaseModel):
     currency: str = Field(default="USD", min_length=3, max_length=3)
     purpose: str = Field(min_length=3, max_length=2000)
     receipt_key: str | None = Field(default=None, max_length=512)
+    receipt_version_id: str | None = Field(default=None, max_length=256)
 
 
 class ExpenseResponse(ORMModel):

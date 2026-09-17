@@ -73,19 +73,33 @@ def _client():
     return boto3.client("s3")
 
 
-def process_record(bucket: str, key: str, client) -> dict:
-    head_object = client.head_object(Bucket=bucket, Key=key)
+def process_record(bucket: str, key: str, version_id: str | None, client) -> dict:
+    """Inspect and tag the exact version this event was raised for.
+
+    Naming the version in every call is what makes the verdict describe the
+    bytes that triggered it. Reading "current" instead means a second upload
+    landing mid-run gets sniffed under the first run's event and the tag is
+    written against whichever version happens to be current when it lands —
+    a verdict about one object attached to another.
+
+    On a bucket without versioning there is no version to name, and the calls
+    fall back to the only object there is.
+    """
+    target = {"Bucket": bucket, "Key": key}
+    if version_id:
+        target["VersionId"] = version_id
+
+    head_object = client.head_object(**target)
     declared_type = head_object.get("ContentType", "")
     size_bytes = head_object["ContentLength"]
 
     # A ranged GET so a large object is never pulled into the function just to
     # read its first bytes.
-    body = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{SNIFF_BYTES - 1}")["Body"].read()
+    body = client.get_object(**target, Range=f"bytes=0-{SNIFF_BYTES - 1}")["Body"].read()
 
     validation, detected, reason = verdict(body, declared_type, size_bytes)
     client.put_object_tagging(
-        Bucket=bucket,
-        Key=key,
+        **target,
         Tagging={
             "TagSet": [
                 {"Key": "validation", "Value": validation},
@@ -94,8 +108,8 @@ def process_record(bucket: str, key: str, client) -> dict:
             ]
         },
     )
-    logger.info("receipt %s: %s (%s, declared %s)", key, validation, reason, declared_type or "none")
-    return {"key": key, "validation": validation, "detected_type": detected, "reason": reason}
+    logger.info("receipt %s (version %s): %s (%s, declared %s)", key, version_id or "none", validation, reason, declared_type or "none")
+    return {"key": key, "version_id": version_id, "validation": validation, "detected_type": detected, "reason": reason}
 
 
 def handler(event: dict, _context=None) -> dict:
@@ -114,8 +128,9 @@ def handler(event: dict, _context=None) -> dict:
     for record in event.get("Records", []):
         bucket = record["s3"]["bucket"]["name"]
         key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+        version_id = record["s3"]["object"].get("versionId")
         try:
-            results.append(process_record(bucket, key, client))
+            results.append(process_record(bucket, key, version_id, client))
         except Exception as error:
             logger.exception("could not validate %s", key)
             results.append({"key": key, "validation": "errored"})

@@ -226,7 +226,7 @@ def record_movement(db: Session, actor: User, item_id, kind: MovementKind, quant
     return movement
 
 
-def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: int, unit_cost: float, currency: str, invoice_number: str, receipt_key: str | None) -> Purchase:
+def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: int, unit_cost: float, currency: str, invoice_number: str, receipt_key: str | None, receipt_version_id: str | None = None) -> Purchase:
     if actor.role is Role.employee:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Employees cannot receive purchases")
     with db.begin_nested():
@@ -237,11 +237,11 @@ def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: in
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
         previous = db.scalar(select(Purchase).where(Purchase.item_id == item_id).order_by(Purchase.created_at.desc()).limit(1))
         if receipt_key:
-            assert_receipt_ownership(receipt_key, actor)
+            assert_receipt_ownership(receipt_key, actor, receipt_version_id)
         previous_cost = float(previous.unit_cost) if previous else 0
         change = round(((unit_cost - previous_cost) / previous_cost) * 100, 1) if previous_cost else 0
         item.quantity_on_hand += quantity
-        purchase = Purchase(item_id=item_id, supplier_id=supplier_id, received_by_id=actor.id, quantity=quantity, unit_cost=Decimal(str(unit_cost)), currency=currency.upper(), invoice_number=invoice_number, receipt_key=receipt_key, price_change_percent=change)
+        purchase = Purchase(item_id=item_id, supplier_id=supplier_id, received_by_id=actor.id, quantity=quantity, unit_cost=Decimal(str(unit_cost)), currency=currency.upper(), invoice_number=invoice_number, receipt_key=receipt_key, receipt_version_id=receipt_version_id, price_change_percent=change)
         db.add(purchase)
         db.flush()
         db.add(StockMovement(item_id=item.id, kind=MovementKind.inbound, quantity=quantity, actor_id=actor.id, recipient="supplier", note=f"Purchase {invoice_number or 'unreferenced'}"))
@@ -259,7 +259,7 @@ def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: in
 def create_expense(db: Session, actor: User, **values) -> Expense:
     receipt_key = values.get("receipt_key")
     if receipt_key:
-        assert_receipt_ownership(receipt_key, actor)
+        assert_receipt_ownership(receipt_key, actor, values.get("receipt_version_id"))
     with db.begin_nested():
         expense = Expense(submitter_id=actor.id, **values)
         db.add(expense)
@@ -395,19 +395,30 @@ def _is_uuid(value) -> bool:
         return False
 
 
-def assert_receipt_ownership(key: str, actor: User) -> None:
+def assert_receipt_ownership(key: str, actor: User, version_id: str | None = None) -> None:
     if not key.startswith(f"receipts/{actor.id}/"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Receipt key does not belong to the current user")
-    assert_receipt_validated(key)
+    assert_receipt_validated(key, version_id)
 
 
-def assert_receipt_validated(key: str) -> None:
+def assert_receipt_validated(key: str, version_id: str | None = None) -> None:
     """Refuse to attach a receipt the upload validator has not cleared.
 
     The presign endpoint can only check what the client declares; the bytes go
     straight from the browser to S3. A Lambda inspects the object on
     ObjectCreated and tags it, and this is the gate that makes that verdict
     mean something.
+
+    Naming the version is what makes a pass stick. A key alone resolves to
+    whatever is current, and the presigned PUT stays usable for its whole
+    window — so without this an attacker could pass validation, attach, then
+    replace the bytes behind the same key. Pinning the checked version at
+    attach time and reading that same version back on download closes it
+    rather than narrowing it.
+
+    A row attached before versions were recorded, or a bucket without
+    versioning, has no version to name and reads as current — the behaviour
+    those rows were attached under.
 
     With no bucket configured (local demo, tests) there is nothing to read, so
     the check stands aside rather than blocking the whole flow.
@@ -416,8 +427,11 @@ def assert_receipt_validated(key: str) -> None:
     if not settings.receipt_bucket_name:
         return
 
+    target = {"Bucket": settings.receipt_bucket_name, "Key": key}
+    if version_id:
+        target["VersionId"] = version_id
     try:
-        tags = boto3.client("s3", region_name=settings.aws_region).get_object_tagging(Bucket=settings.receipt_bucket_name, Key=key)
+        tags = boto3.client("s3", region_name=settings.aws_region).get_object_tagging(**target)
     except Exception:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt was not found in storage")
 

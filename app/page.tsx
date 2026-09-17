@@ -304,7 +304,7 @@ export default function Home() {
         setStore(value => withDemoForecast({ ...value, items: value.items.map(entry => entry.id === itemId ? { ...entry, qty: entry.qty + quantity } : entry), purchases: [purchase, ...value.purchases], movements: [{ id: crypto.randomUUID(), kind: 'inbound', itemId, qty: quantity, actor: user.name, recipient: value.suppliers.find(entry => entry.id === supplierId)?.name || 'Supplier', note: purchase.invoice, at: purchase.at }, ...value.movements], audits: [audit(user, 'Received purchase', item.name, `${quantity} ${item.unit} received at ${money(unitCost)} each`), ...value.audits] }));
         setDialog(null); tell('Purchase and receipt recorded.'); return;
       }
-      await withReceipt(receipt, receiptKey => api('/api/purchases', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')), supplier_id: String(form.get('supplier')), quantity: Number(form.get('qty')), unit_cost: Number(form.get('unitCost')), currency: 'USD', invoice_number: String(form.get('invoice')).trim(), receipt_key: receiptKey }) }));
+      await withReceipt(receipt, uploaded => api('/api/purchases', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')), supplier_id: String(form.get('supplier')), quantity: Number(form.get('qty')), unit_cost: Number(form.get('unitCost')), currency: 'USD', invoice_number: String(form.get('invoice')).trim(), receipt_key: uploaded?.key, receipt_version_id: uploaded?.versionId }) }));
       await refresh(); setDialog(null); tell('Purchase and receipt recorded.');
     } catch (error) { tell(error instanceof Error ? error.message : 'Purchase could not be recorded.'); }
   };
@@ -317,7 +317,7 @@ export default function Home() {
         setStore(value => ({ ...value, expenses: [expense, ...value.expenses], audits: [audit(user, 'Submitted reimbursement', expense.supplier, `${money(expense.amount)} reimbursement submitted`), ...value.audits] }));
         setDialog(null); tell('Reimbursement submitted for approval.'); return;
       }
-      await withReceipt(receipt, receiptKey => api('/api/expenses', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')) || null, supplier: String(form.get('supplier')).trim(), quantity: Number(form.get('qty')), amount: Number(form.get('amount')), currency: 'USD', purpose: String(form.get('purpose')).trim(), receipt_key: receiptKey }) }));
+      await withReceipt(receipt, uploaded => api('/api/expenses', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')) || null, supplier: String(form.get('supplier')).trim(), quantity: Number(form.get('qty')), amount: Number(form.get('amount')), currency: 'USD', purpose: String(form.get('purpose')).trim(), receipt_key: uploaded?.key, receipt_version_id: uploaded?.versionId }) }));
       await refresh(); setDialog(null); tell('Reimbursement submitted for approval.');
     } catch (error) { tell(error instanceof Error ? error.message : 'Expense could not be submitted.'); }
   };
