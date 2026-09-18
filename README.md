@@ -175,11 +175,11 @@ app/cache.py                                    141      7    95%
 lambdas/supplier_price_webhook/handler.py        80      4    95%
 app/agent/tools.py                               72      5    93%
 app/main.py                                     177     15    92%
-app/audit_events.py                             117     15    87%
+app/audit_events.py                             117     13    89%
 app/auth.py                                      75     16    79%
 app/db.py                                        13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1444     73    95%
+TOTAL                                         1444     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
