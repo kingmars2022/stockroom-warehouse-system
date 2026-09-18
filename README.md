@@ -158,7 +158,7 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-288 tests, 95% statement coverage, with an 80% floor enforced in CI.
+289 tests, 95% statement coverage, with an 80% floor enforced in CI.
 
 ```
 Name                                         Stmts   Miss  Cover

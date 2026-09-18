@@ -390,28 +390,78 @@ def test_a_receipt_attached_before_versions_were_recorded_still_downloads(db, em
     assert "VersionId" not in presigned
 
 
-def test_the_migration_chain_applies_to_an_empty_database(tmp_path, monkeypatch):
-    """Nothing else here runs the migrations: conftest builds the schema from
-    the ORM, so the chain only ever ran in CI's docker-compose job. The initial
-    migration creates its tables from `Base.metadata` at HEAD, so every column
-    added to a model later is already present by the time that column's own
-    migration runs — which fails a fresh `alembic upgrade head` outright.
+def _schema_of(url: str) -> dict:
+    """Everything about a schema that the application depends on."""
+    inspector = sa.inspect(sa.create_engine(url))
+    schema = {}
+    for table in sorted(inspector.get_table_names()):
+        if table == "alembic_version":
+            continue
+        schema[table] = {
+            "columns": {column["name"]: (str(column["type"]), bool(column["nullable"]))
+                        for column in inspector.get_columns(table)},
+            "primary_key": tuple(inspector.get_pk_constraint(table)["constrained_columns"]),
+            "indexes": sorted((index["name"], tuple(index["column_names"]), bool(index.get("unique")))
+                              for index in inspector.get_indexes(table)),
+            "unique": sorted(tuple(constraint["column_names"])
+                             for constraint in inspector.get_unique_constraints(table)),
+            "foreign_keys": sorted((tuple(key["constrained_columns"]), key["referred_table"],
+                                    tuple(key["referred_columns"]), (key.get("options") or {}).get("ondelete"))
+                                   for key in inspector.get_foreign_keys(table)),
+        }
+    return schema
+
+
+def test_the_migrations_build_exactly_the_schema_the_orm_expects(tmp_path, monkeypatch):
+    """Nothing else here runs the migrations: conftest builds its schema from
+    the ORM, so the chain only ever ran in CI's docker-compose job — and a
+    migration that disagreed with the models was invisible until deployment.
+
+    It disagreed twice. The initial migration built its tables from
+    `Base.metadata`, which is HEAD rather than a snapshot of that revision, so
+    it created whatever later migrations were supposed to add and then collided
+    with them: DuplicateTable for `processed_submissions`, DuplicateColumn for
+    `receipt_version_id`. Comparing the two schemas catches that, and catches
+    the commoner version of it too — a model changed with no migration written.
     """
     from alembic import command
     from alembic.config import Config
 
     from app.config import get_settings
+    from app.db import Base
 
     # env.py resolves the URL from settings and overrides whatever the caller
     # passes in, so the environment is the only way to aim it at a scratch db.
-    url = f"sqlite:///{tmp_path / 'chain.db'}"
-    monkeypatch.setenv("DATABASE_URL", url)
+    migrated = f"sqlite:///{tmp_path / 'migrated.db'}"
+    monkeypatch.setenv("DATABASE_URL", migrated)
     get_settings.cache_clear()
     try:
         command.upgrade(Config("alembic.ini"), "head")
     finally:
         get_settings.cache_clear()
 
-    inspector = sa.inspect(sa.create_engine(url))
-    for table in ("purchases", "expenses"):
-        assert "receipt_version_id" in {column["name"] for column in inspector.get_columns(table)}
+    from_orm = f"sqlite:///{tmp_path / 'orm.db'}"
+    Base.metadata.create_all(sa.create_engine(from_orm))
+
+    assert _schema_of(migrated) == _schema_of(from_orm)
+
+
+def test_the_migrations_reverse_cleanly(tmp_path, monkeypatch):
+    from alembic import command
+    from alembic.config import Config
+
+    from app.config import get_settings
+
+    url = f"sqlite:///{tmp_path / 'chain.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    get_settings.cache_clear()
+    try:
+        config = Config("alembic.ini")
+        command.upgrade(config, "head")
+        command.downgrade(config, "base")
+    finally:
+        get_settings.cache_clear()
+
+    remaining = [table for table in sa.inspect(sa.create_engine(url)).get_table_names()
+                 if table != "alembic_version"]
+    assert remaining == []
