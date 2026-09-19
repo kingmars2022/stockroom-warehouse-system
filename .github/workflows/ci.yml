@@ -140,3 +140,33 @@ jobs:
             https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
           tar xf kubeconform.tar.gz kubeconform
           ./kubeconform -strict -summary -ignore-missing-schemas infra/k8s/
+
+  terraform:
+    runs-on: ubuntu-latest
+    # Nothing else here reads the Terraform at all -- the manifests job above
+    # covers infra/k8s only -- so a stack could stop parsing and every other
+    # job would still pass. This is static checking: `-backend=false` and
+    # `validate` need no credentials, reach no account, and create nothing.
+    # It catches an undefined reference or a mistyped argument, not a bad plan.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          # The wrapper rewrites stdout, which makes a failure harder to read.
+          terraform_wrapper: false
+      - name: Check formatting
+        run: terraform fmt -check -recursive infra/terraform
+
+      # Separate root modules with different providers -- the free-tier one
+      # also pulls archive and random -- so each initialises on its own rather
+      # than inheriting anything from the other.
+      - name: Validate the production stack
+        working-directory: infra/terraform
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Validate the free-tier stack
+        working-directory: infra/terraform/freetier
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
