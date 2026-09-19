@@ -14,8 +14,8 @@ It creates only two things:
 | Resource | Why it is here |
 |---|---|
 | Cognito user pool, client, 3 groups | Exercises [`auth.py`](../../../backend/app/auth.py) — real RS256 tokens, real JWKS, real `cognito:groups` |
-| Private S3 bucket (SSE, CORS, public access blocked) | Exercises the presigned upload path in [`main.py`](../../../backend/app/main.py) |
-| Receipt-validator Lambda + S3 event notification | Closes a real gap: presign can only check what the client *declares*, and the browser uploads straight to S3. The function reads the first bytes on `ObjectCreated`, compares the real signature against the declared type, and tags the verdict. [`handler.py`](../../../backend/lambdas/receipt_validator/handler.py) |
+| Private S3 bucket (versioned, SSE, CORS, public access blocked) | Exercises the presigned upload path in [`main.py`](../../../backend/app/main.py). Versioning is on and CORS exposes `x-amz-version-id`, because a receipt is attached by version rather than by key — without both the API has no version to pin, falls back to whatever is current, and the verification passes without exercising what it claims to |
+| Receipt-validator Lambda + S3 event notification | Closes a real gap: presign can only check what the client *declares*, and the browser uploads straight to S3. The function reads the first bytes on `ObjectCreated`, compares the real signature against the declared type, and tags the verdict against the version whose arrival raised the event. [`handler.py`](../../../backend/lambdas/receipt_validator/handler.py) |
 | API Gateway (HTTP API) + price-webhook Lambda | Lets suppliers push price quotes without a Cognito account. HMAC-signed, throttled, write-only into its own S3 prefix, and with no route to the database. [`handler.py`](../../../backend/lambdas/supplier_price_webhook/handler.py) |
 
 Those are the services the application code actually talks to. PostgreSQL stays
@@ -107,9 +107,12 @@ python verify.py --email you@example.com --password 'ChangeThis!2026'
 
 It signs in to Cognito, prints the issuer and claims off the returned token,
 sends that token to the local API, uploads a file through the presigned URL the
-API returns, confirms the object landed in S3, and then waits for the validator
-Lambda to tag it. Every step touches real AWS, and the last one proves the S3
-event actually reached the function.
+API returns, confirms the object landed in S3, and waits for the validator
+Lambda to tag that version. It then replaces the bytes behind the same key
+through the still-valid presigned URL and re-reads the approved version, which
+must still carry its own verdict and its own bytes — the swap that matters is
+one that would *pass* validation on its way in, so re-reading a verdict cannot
+catch it and only the pinned version can. Every step touches real AWS.
 
 Screenshot the output, plus the Cognito pool, the S3 object's tags, and the
 function's CloudWatch log line — that is the evidence the integration works.

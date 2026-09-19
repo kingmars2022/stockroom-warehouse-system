@@ -75,14 +75,23 @@ def main() -> int:
     if upload.status_code != 200:
         print(f"   FAILED {upload.status_code}: {upload.text}")
         return 1
+    # The browser only ever sees this because the bucket's CORS config exposes
+    # it. Without the version the API records nothing to pin, silently falls
+    # back to reading whatever is current, and the checks below would pass
+    # while proving none of what they claim.
+    version = upload.headers.get("x-amz-version-id")
+    if not version:
+        print("   FAILED: no x-amz-version-id — is versioning enabled and the header exposed in CORS?")
+        return 1
+    print(f"   version: {version}")
 
     print("4. Confirming the object exists in S3...")
     s3 = boto3.client("s3", region_name=region)
-    head = s3.head_object(Bucket=bucket, Key=intent["key"])
+    head = s3.head_object(Bucket=bucket, Key=intent["key"], VersionId=version)
     print(f"   {head['ContentLength']} bytes, {head['ContentType']}, SSE {head.get('ServerSideEncryption')}")
 
-    print("5. Waiting for the validator Lambda to tag the object...")
-    tags = wait_for_tags(s3, bucket, intent["key"])
+    print("5. Waiting for the validator Lambda to tag that version...")
+    tags = wait_for_tags(s3, bucket, intent["key"], version)
     if tags is None:
         print("   FAILED: no tags after 30s — check the function's CloudWatch logs")
         return 1
@@ -91,16 +100,44 @@ def main() -> int:
         print("   FAILED: a valid PNG should have passed validation")
         return 1
 
+    # The replacement that matters is not one that fails validation — it is one
+    # that passes. Re-reading the verdict cannot catch a swap for an equally
+    # valid file; only pinning the version can, so that is what is checked.
+    print("6. Replacing the bytes behind the same key, then re-reading the pinned version...")
+    replacement = requests.put(
+        intent["upload_url"], data=png + b"\x00", headers={"Content-Type": "image/png"}, timeout=15
+    )
+    if replacement.status_code != 200:
+        print(f"   FAILED {replacement.status_code}: {replacement.text}")
+        return 1
+    current = replacement.headers.get("x-amz-version-id")
+    if current == version:
+        print("   FAILED: the replacement reused the same version — versioning is not on")
+        return 1
+    print(f"   current version is now {current}, approved version is still {version}")
+
+    pinned = {tag["Key"]: tag["Value"] for tag in
+              s3.get_object_tagging(Bucket=bucket, Key=intent["key"], VersionId=version).get("TagSet", [])}
+    if pinned.get("validation") != "passed":
+        print(f"   FAILED: the approved version's verdict changed to {pinned.get('validation')!r}")
+        return 1
+    if s3.head_object(Bucket=bucket, Key=intent["key"], VersionId=version)["ContentLength"] != len(png):
+        print("   FAILED: the approved version's bytes changed underneath it")
+        return 1
+    print("   the approved version still reads passed and still holds its original bytes")
+
     print("\nVerified: real Cognito token accepted by the API, real object in S3,")
-    print("and the S3 event triggered the Lambda that validated it.")
+    print("the S3 event triggered the Lambda that validated that version, and a")
+    print("later replacement did not disturb the version that was approved.")
     return 0
 
 
-def wait_for_tags(s3, bucket: str, key: str, attempts: int = 15) -> dict | None:
+def wait_for_tags(s3, bucket: str, key: str, version: str, attempts: int = 15) -> dict | None:
     """The Lambda runs on an S3 event, so the tags appear a moment after the
-    upload rather than with it."""
+    upload rather than with it. Read by version: the point of the check is that
+    the verdict belongs to specific bytes, not to whatever the key resolves to."""
     for _ in range(attempts):
-        tagging = s3.get_object_tagging(Bucket=bucket, Key=key)
+        tagging = s3.get_object_tagging(Bucket=bucket, Key=key, VersionId=version)
         tags = {tag["Key"]: tag["Value"] for tag in tagging.get("TagSet", [])}
         if tags:
             return tags

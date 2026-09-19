@@ -27,6 +27,20 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "receipts" {
   }
 }
 
+# A receipt is attached by version, not by key, so without this the verification
+# has nothing to verify: the API would record no version, fall back to reading
+# whatever is current, and the run would look like a pass while exercising the
+# path this stack exists to prove. Safe to enable here only because the bucket
+# above sets force_destroy, which removes noncurrent versions and delete markers
+# too — otherwise versioning would leave the bucket undeletable.
+resource "aws_s3_bucket_versioning" "receipts" {
+  bucket = aws_s3_bucket.receipts.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 resource "aws_s3_bucket_cors_configuration" "receipts" {
   bucket = aws_s3_bucket.receipts.id
 
@@ -34,6 +48,9 @@ resource "aws_s3_bucket_cors_configuration" "receipts" {
     allowed_methods = ["PUT", "GET"]
     allowed_origins = var.frontend_origins
     allowed_headers = ["content-type"]
+    # The browser uploads straight to S3, so this response header is the only
+    # way the client learns which version it just created.
+    expose_headers  = ["x-amz-version-id"]
     max_age_seconds = 300
   }
 }
