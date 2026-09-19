@@ -203,6 +203,17 @@ a live Redis, and a pass of the audit-event tests against a live MongoDB —
 the in-memory stand-ins only approximate those query engines, so the real ones
 are exercised rather than assumed.
 
+Three things CI checks that no test touches. It brings the stack up with
+`docker compose up` and waits for `/health`, because the suite installs the
+dependencies itself and never runs the container's own entrypoint — the gap
+that let a missing `prepend_sys_path` crash-loop the API on a fresh start while
+every other job stayed green. It runs the Kubernetes manifests through
+kubeconform. And it formats and validates both Terraform stacks, which nothing
+else reads: without that a stack could stop parsing and the whole run would
+still report success. That last one is deliberately static — `-backend=false`
+and `validate` need no credentials, reach no AWS account and create nothing, so
+it catches an undefined reference or a mistyped argument, not a bad plan.
+
 Correctness and capacity are different questions — [`backend/loadtest/`](backend/loadtest)
 answers the second one by driving the real app with concurrent virtual users
 over real HTTP. 50 users, 30 seconds, one unscaled `uvicorn` process:
@@ -248,7 +259,11 @@ pytest
 
 Kubernetes manifests and their notes are in [`infra/k8s/`](infra/k8s); AWS
 resources (RDS, Cognito, the receipt bucket, ECR) are described in
-[`infra/terraform/`](infra/terraform).
+[`infra/terraform/`](infra/terraform), alongside a
+[free-tier stack](infra/terraform/freetier) that stands up only the pieces the
+application actually talks to — Cognito, the bucket and the two Lambdas — so
+the AWS integration can be proven against AWS and torn down the same
+afternoon. Both stacks are format-checked and validated in CI.
 
 ## More detail
 
