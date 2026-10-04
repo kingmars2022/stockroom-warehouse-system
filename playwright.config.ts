@@ -4,6 +4,9 @@ const PORT = 3100;
 
 export default defineConfig({
   testDir: './e2e',
+  // Its own config, because it needs a production build rather than this
+  // server — see playwright.demo.config.ts.
+  testIgnore: /demo-build\.spec\.ts/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

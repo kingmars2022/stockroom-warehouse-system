@@ -156,7 +156,16 @@ const demoAccounts: User[] = [
   { email: 'supervisor@stockroom.test', password: 'Stockroom!2026', name: 'Mia Wong', role: 'supervisor', scope: 'Warehouse operations and purchasing' },
   { email: 'employee@stockroom.test', password: 'Stockroom!2026', name: 'Alex Chen', role: 'employee', scope: 'Own stock issues and reimbursements' },
 ];
-const localDemoAuth = process.env.NODE_ENV === 'development' && !process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID && !process.env.NEXT_PUBLIC_COGNITO_APP_CLIENT_ID;
+// Demo mode: an in-memory warehouse, seeded accounts, no backend. `next dev`
+// gets it for free so the console runs with nothing configured; a build with
+// NEXT_PUBLIC_DEMO=true gets it too, which is what makes a hosted,
+// backend-less demo possible at all.
+//
+// The second half of the condition is the part that matters: however the first
+// half is satisfied, demo mode is off the moment a Cognito pool is configured.
+// A real deployment cannot be talked into it by a stray build flag.
+const localDemoAuth = (process.env.NODE_ENV === 'development' || process.env.NEXT_PUBLIC_DEMO === 'true')
+  && !process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID && !process.env.NEXT_PUBLIC_COGNITO_APP_CLIENT_ID;
 const noSummary: Summary = { total: 0, unitsOnHand: 0, lowStockCount: 0, lowStock: [] };
 const emptyStore = (): Store => ({ items: [], itemTotal: 0, summary: noSummary, suppliers: [], movements: [], movementTotal: 0, purchases: [], purchaseTotal: 0, priceAlerts: [], priceAlertTotal: 0, expenses: [], expenseTotal: 0, audits: [], auditTotal: 0, replenishment: [], replenishmentTotal: 0, threshold: 15, defaultAppearance });
 function demoReplenishment(store: Omit<Store, Derived>): Replenishment[] {

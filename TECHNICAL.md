@@ -161,7 +161,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 ## Tests
 
 334 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 33 browser tests driving the real console in Chromium.
+CI, plus 33 browser tests driving the real console in Chromium and one more
+against a production build of it.
 
 ```
 Name                                         Stmts   Miss  Cover
@@ -196,9 +197,19 @@ against the dev server, because `lint` and `build` prove it compiles and say
 nothing about what it renders. They cover what only a browser can answer: the
 storage codes it spells out, the currency it prints, the dark theme's computed
 colours, and that a long table renders a page rather than the warehouse.
-Playwright starts the dev server itself — the console's demo mode is gated on
-`NODE_ENV=development`, so a production build would leave every test at a
-login it cannot complete.
+Playwright starts the dev server itself, since demo mode comes free under
+`next dev`.
+
+One test is run against a production build instead
+([`playwright.demo.config.ts`](playwright.demo.config.ts)), because the suite
+above cannot see the thing a host would actually serve: `NEXT_PUBLIC_*` values
+are inlined by `next build`, so whether a build reaches demo mode is decided at
+build time. Demo mode was gated on `NODE_ENV` alone until this, which meant
+every artifact a host could serve stopped at a login nothing could complete —
+the console was only ever runnable from a developer's own machine. It now also
+answers to an explicit `NEXT_PUBLIC_DEMO=true`, and the gate keeps its second
+half: however the flag is set, demo mode is off the moment a Cognito pool is
+configured, so a real deployment cannot be talked into it.
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
 means the `SELECT … FOR UPDATE` lock is never really contended there — SQLite

@@ -87,8 +87,24 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
   151 KB, because every screen asks for the page it is showing. The inventory screen opens
   in about a sixth of a second, finding something to issue is a search box rather than a
   10,000-line dropdown, and working out what to reorder went from 3.3 seconds to under one.
-- **Thoroughly tested.** 334 automated tests cover 95% of the code, plus 33 that drive the
+- **Thoroughly tested.** 334 automated tests cover 95% of the code, plus 34 that drive the
   screens in a real browser, and every change is checked automatically before it goes in.
+
+## Try it
+
+The console runs on its own, with no backend and nothing to configure: build it
+with `NEXT_PUBLIC_DEMO=true` and it serves a seeded warehouse held in memory,
+which resets on refresh. Sign in as `admin@stockroom.test`,
+`supervisor@stockroom.test` or `employee@stockroom.test` — the password is
+`Stockroom!2026` — and each sees only what their role is allowed to.
+
+```bash
+npm install
+NEXT_PUBLIC_DEMO=true npm run build && npm start
+```
+
+Demo mode switches itself off the moment a Cognito user pool is configured, so
+a real deployment cannot land in it by accident.
 
 ## About this project
 

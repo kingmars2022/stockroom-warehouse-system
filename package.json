@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:build": "playwright test --config playwright.demo.config.ts"
   },
   "dependencies": {
     "aws-amplify": "^6.20.0",

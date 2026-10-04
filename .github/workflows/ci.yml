@@ -40,6 +40,15 @@ jobs:
       - name: Install the browser
         run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+
+      # The suite above drives `next dev`, which says nothing about the thing a
+      # host would actually serve: NEXT_PUBLIC_* values are inlined by
+      # `next build`, so whether a production build reaches demo mode cannot be
+      # checked by running the dev server. This builds it the way a free static
+      # host would and signs in against it.
+      - name: Check the deployable demo build
+        run: npm run test:e2e:build
+
       - name: Upload the report when something fails
         if: failure()
         uses: actions/upload-artifact@v4
