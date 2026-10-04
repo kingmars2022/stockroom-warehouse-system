@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { go, signIn } from './helpers';
+import { go, pickItem, signIn } from './helpers';
 
 /**
  * Price alerts come from the server now. They used to be the console filtering
@@ -50,8 +50,7 @@ test('the dashboard counts every alert, and the threshold decides what is one', 
 test('a first purchase of an item is a first price, not a price rise', async ({ page }) => {
   await go(page, 'Procurement');
   await page.click('button:has-text("Receive purchase")');
-  await page.fill('.picker .picker-search', 'Laptop stand');
-  await page.locator('.picker-results li button').first().click();
+  await pickItem(page, 'Laptop stand');
   await page.selectOption('select[name="supplier"]', { label: 'Northstar Supply' });
   await page.fill('input[name="qty"]', '10');
   await page.fill('input[name="unitCost"]', '99.99');

@@ -160,8 +160,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-319 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 27 browser tests driving the real console in Chromium.
+330 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 32 browser tests driving the real console in Chromium.
 
 ```
 Name                                         Stmts   Miss  Cover
@@ -169,20 +169,20 @@ Name                                         Stmts   Miss  Cover
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
 app/models.py                                  109      0   100%
-app/schemas.py                                 178      0   100%
+app/schemas.py                                 183      0   100%
 app/config.py                                   27      0   100%
 app/services.py                                243      1    99%
 lambdas/receipt_validator/handler.py            59      1    98%
 app/agent/llm.py                                97      5    95%
 app/cache.py                                   141      7    95%
 lambdas/supplier_price_webhook/handler.py       80      4    95%
-app/main.py                                    222     15    93%
+app/main.py                                    234     15    94%
 app/agent/tools.py                              72      5    93%
 app/audit_events.py                            117     13    89%
 app/auth.py                                     75     16    79%
 app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1491     71    95%
+TOTAL                                         1508     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -337,12 +337,44 @@ every *other* supplier of that item, picked by one `ROW_NUMBER` query for the
 whole page rather than one per alert. Its count is taken before the page is
 cut, so the card is right whatever the page holds.
 
-What is still unpaged: `/api/expenses` (0.95 MB here) and the catalogue itself.
-Two things still want the whole catalogue — the dashboard's totals (SKU count,
-units on hand, what is below its minimum), which want a summary endpoint rather
-than a list, and the item picker's search, which wants `/api/items?search=`
-instead of filtering in the browser. Paging those as well brings the same
-sign-in to 1.03 MB.
+### Nothing answers with a whole table
+
+Two things were still reducing over the entire catalogue in the browser, and
+both are now the server's job.
+
+**The dashboard's three figures** — SKUs, units on hand, what is below its
+minimum — came from looping over every item. `/api/items/summary` answers them
+as three aggregates and a short list of the most depleted, ordered by the
+shortfall against the minimum rather than by what is left: 2 of a minimum of 50
+is more urgent than 2 of 2. `low_stock` is the handful the attention queue
+shows; `low_stock_count` is what the card prints, so the two cannot disagree.
+The card's own link into the inventory became `/api/items?low_only=true`, since
+a filter the console applies to a page it holds is a filter over the wrong set.
+
+**The item picker** filtered an in-memory array. It takes a search *function*
+now — `/api/items?search=` against a real API, a memory filter in demo mode —
+debounced, with a ticket that discards an answer arriving after a later one so
+a slow response to "la" cannot overwrite the results for "label". The chosen
+item is kept by the picker and handed back whole, because nothing upstream has
+a catalogue to look an id up in; the barcode scanner resolves its SKU the same
+way, and so does approving an agent proposal.
+
+With those two done, `/api/expenses` and `/api/audit-logs` took the same
+`limit`/`offset` treatment, and every long table in the console has a pager.
+Signing in against the same simulated warehouse:
+
+| | before | after |
+|---|---|---|
+| `/api/items` | 10,000 rows, 2.55 MB | 50 rows, 0.01 MB + a 0.00 MB summary |
+| `/api/movements` | 50,000 rows, 16.00 MB | 50 rows, 0.02 MB |
+| `/api/purchases` | 30,000 rows, 12.19 MB | 50 rows, 0.02 MB, + 0.03 MB of alerts |
+| `/api/expenses` | 2,000 rows, 0.95 MB | 50 rows, 0.02 MB |
+| **total** | **31.69 MB** | **107 KB** |
+
+`limit` stays optional on every one of them rather than defaulting to a page.
+An unpaged read is still the honest answer for a small warehouse and for
+anything scripted against this API; what changed is that nothing in the console
+asks for one.
 
 ## Run it
 

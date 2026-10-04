@@ -226,3 +226,55 @@ def test_a_settings_row_does_not_stop_the_alerts_reading_the_threshold(api, admi
     purchases(db, widget, supplier, supervisor, 1, price_change=20.0)
 
     assert api.act_as(supervisor).get("/api/price-alerts").json() == []
+
+
+# --------------------------------------------------------------------------
+# Reimbursements and the audit trail
+# --------------------------------------------------------------------------
+
+def _claims(db, submitter, count: int) -> None:
+    from app.models import Expense
+    db.add_all([Expense(submitter_id=submitter.id, supplier="Corner Store", quantity=1, amount=5 + index, currency="CAD", purpose=f"Claim {index}", created_at=TIED) for index in range(count)])
+    db.commit()
+
+
+def test_a_page_of_reimbursements_reports_the_length_of_the_whole_list(api, supervisor, db):
+    _claims(db, supervisor, 18)
+
+    response = api.act_as(supervisor).get("/api/expenses", params={"limit": 10})
+
+    assert len(response.json()) == 10
+    assert response.headers["X-Total-Count"] == "18"
+
+
+def test_paging_reimbursements_walks_the_list_once(api, supervisor, db):
+    _claims(db, supervisor, 25)
+
+    seen = []
+    for offset in (0, 10, 20):
+        seen += [row["id"] for row in api.act_as(supervisor).get("/api/expenses", params={"limit": 10, "offset": offset}).json()]
+
+    assert len(set(seen)) == 25
+    assert seen == sorted(seen), "the order is partial, so the pages are not cut from one list"
+
+
+def test_an_employees_reimbursement_count_is_their_own(api, employee, supervisor, db):
+    _claims(db, supervisor, 7)
+    _claims(db, employee, 2)
+
+    response = api.act_as(employee).get("/api/expenses", params={"limit": 10})
+
+    assert len(response.json()) == 2
+    assert response.headers["X-Total-Count"] == "2"
+
+
+def test_a_page_of_the_audit_trail_reports_its_whole_length(api, admin, widget, db):
+    from app.models import AuditLog
+
+    db.add_all([AuditLog(actor_id=admin.id, actor_role=admin.role, action="issued_stock", target_type="item", target_id=str(widget.id), detail=f"entry {index}", created_at=TIED) for index in range(14)])
+    db.commit()
+
+    response = api.act_as(admin).get("/api/audit-logs", params={"limit": 5})
+
+    assert len(response.json()) == 5
+    assert response.headers["X-Total-Count"] == "14"

@@ -40,6 +40,21 @@ class ItemResponse(ORMModel):
     updated_at: datetime
 
 
+class ItemSummaryResponse(BaseModel):
+    """What the dashboard needs to know about the catalogue without being sent it.
+
+    The three figures on its cards were counted in the browser over every item
+    in the warehouse, which is the last reason the console had to hold all of
+    them. `low_stock` is the handful the attention queue shows, most depleted
+    first.
+    """
+
+    total: int
+    units_on_hand: int
+    low_stock_count: int
+    low_stock: list[ItemResponse]
+
+
 class MovementCreate(BaseModel):
     item_id: UUID
     kind: MovementKind

@@ -40,6 +40,14 @@ export interface SupplierResponse {
   status: SupplierStatus;
 }
 
+/** The dashboard's figures, counted server-side. */
+export interface ItemSummaryResponse {
+  total: number;
+  units_on_hand: number;
+  low_stock_count: number;
+  low_stock: ItemResponse[];
+}
+
 export interface MovementResponse {
   id: string;
   item_id: string;

@@ -356,7 +356,8 @@ http://localhost:8000/docs
 | --- | --- | --- | --- |
 | `GET` | `/health` | Public | Health check |
 | `GET` | `/api/me` | Any authenticated user | Current authenticated profile |
-| `GET` | `/api/items` | Any authenticated user | Inventory catalog; `search`, `limit`, `offset`, full size in `X-Total-Count` |
+| `GET` | `/api/items` | Any authenticated user | One page of the catalogue; `search`, `low_only`, `limit`, `offset`, full size in `X-Total-Count` |
+| `GET` | `/api/items/summary` | Any authenticated user | SKU count, units on hand, low-stock count, and the most depleted few |
 | `POST` | `/api/items` | Admin | Create inventory item |
 | `GET` | `/api/movements` | Any authenticated user | One page of movements, each naming its item; `limit`, `offset`, `X-Total-Count`; employee scope is limited to their own actions |
 | `POST` | `/api/movements` | Any authenticated user | Record inbound/outbound stock movement; employees cannot receive stock |
@@ -368,10 +369,10 @@ http://localhost:8000/docs
 | `GET` | `/api/price-policy` | Admin, supervisor | Read price-increase threshold |
 | `PATCH` | `/api/price-policy` | Admin | Update price-increase threshold |
 | `GET` | `/api/replenishment-recommendations` | Admin, supervisor | Demand-based replenishment and supplier suggestions |
-| `GET` | `/api/expenses` | Any authenticated user | Expenses; employee scope is limited to their own submissions |
+| `GET` | `/api/expenses` | Any authenticated user | One page of expenses; `limit`, `offset`, `X-Total-Count`; employee scope is limited to their own submissions |
 | `POST` | `/api/expenses` | Any authenticated user | Submit expense |
 | `PATCH` | `/api/expenses/{expense_id}/status` | Supervisor/admin depending on transition | Approve, reject, or pay expense |
-| `GET` | `/api/audit-logs` | Admin | Full audit history |
+| `GET` | `/api/audit-logs` | Admin | One page of the audit history; `limit`, `offset`, `X-Total-Count` |
 | `POST` | `/api/attachments/presign` | Any authenticated user | Request private S3 receipt upload URL |
 | `GET` | `/api/attachments/download` | Authorized user | Request authorized private receipt download URL |
 

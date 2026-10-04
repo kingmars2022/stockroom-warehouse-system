@@ -12,7 +12,7 @@ from .auth import get_current_user, require_roles
 from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
-from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PriceAlertResponse, PriceAlternative, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, ItemSummaryResponse, MeResponse, MovementCreate, MovementResponse, PriceAlertResponse, PriceAlternative, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
 from .agent import build_client, run_agent
 from .audit_events import get_event_store, query as query_events
 from .cache import get_cache
@@ -139,18 +139,21 @@ def list_items(
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     search: str = Query("", max_length=200, description="Matches name, SKU, category, or storage location."),
+    low_only: bool = Query(False, description="Only items at or below their minimum level."),
     limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Items per page. Omitted returns the whole catalogue."),
     offset: int = Query(0, ge=0),
 ):
     """One page of the catalogue, with the full size in `X-Total-Count`.
 
-    `limit` is optional because the console still holds the catalogue to put a
-    name against the item id on a movement, a purchase and an expense row. A
-    warehouse with 10,000 SKUs has no business being sent all of them, and the
-    step that lets this cap become mandatory is carrying `item_name` on those
-    rows the way they already carry `actor_name`.
+    `limit` stays optional because an unpaged read is still the honest answer
+    for a small warehouse and for anything scripted against this. Nothing in
+    the console asks for one any more: the rows that reference an item carry
+    its name, and `/api/items/summary` answers the dashboard's totals, so the
+    catalogue is read a page at a time like any other list here.
     """
     query = select(Item)
+    if low_only:
+        query = query.where(Item.quantity_on_hand <= Item.minimum_quantity)
     if search.strip():
         pattern = f"%{search.strip().translate(LIKE_ESCAPES)}%"
         query = query.where(or_(
@@ -166,6 +169,31 @@ def list_items(
     if limit is not None:
         query = query.limit(limit)
     return db.scalars(query).all()
+
+
+@app.get("/api/items/summary", response_model=ItemSummaryResponse)
+def read_item_summary(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    low_stock_limit: int = Query(5, ge=1, le=50),
+):
+    """The dashboard's three figures, counted in the database.
+
+    They were worked out in the browser by reducing over every item in the
+    warehouse, which was the last thing keeping the whole catalogue in the
+    console. Three aggregates and a short list cost the same whether the
+    warehouse holds eight SKUs or ten thousand.
+    """
+    low = Item.quantity_on_hand <= Item.minimum_quantity
+    total, units = db.execute(select(func.count(Item.id), func.coalesce(func.sum(Item.quantity_on_hand), 0))).one()
+    return ItemSummaryResponse(
+        total=total,
+        units_on_hand=int(units),
+        low_stock_count=db.scalar(select(func.count()).select_from(Item).where(low)),
+        # Most depleted first, by the shortfall against the minimum rather than
+        # the raw count: 2 left of a minimum of 50 is more urgent than 2 of 2.
+        low_stock=db.scalars(select(Item).where(low).order_by(Item.quantity_on_hand - Item.minimum_quantity, Item.name).limit(low_stock_limit)).all(),
+    )
 
 
 @app.post("/api/items", response_model=ItemResponse, status_code=status.HTTP_201_CREATED)
@@ -354,9 +382,19 @@ def list_replenishment_recommendations(_: User = Depends(require_roles(Role.admi
 
 
 @app.get("/api/expenses", response_model=list[ExpenseResponse])
-def list_expenses(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_expenses(
+    response: Response,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Reimbursements per page, newest first."),
+    offset: int = Query(0, ge=0),
+):
     submitter = aliased(User)
     reviewer = aliased(User)
+    # The same restriction bounds the count as the page, or an employee is told
+    # there are more of their claims than they can reach.
+    scope = (Expense.submitter_id == user.id,) if user.role is Role.employee else ()
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(Expense).where(*scope)))
     query = (
         select(Expense, submitter.name, reviewer.name, Item.name, Item.unit)
         .join(submitter, Expense.submitter_id == submitter.id)
@@ -364,10 +402,12 @@ def list_expenses(db: Session = Depends(get_db), user: User = Depends(get_curren
         # Outer: a reimbursement need not name a catalogued item, and the FK
         # is ON DELETE SET NULL, so one can lose the item it named.
         .outerjoin(Item, Expense.item_id == Item.id)
-        .order_by(Expense.created_at.desc())
+        .where(*scope)
+        .order_by(Expense.created_at.desc(), Expense.id)
+        .offset(offset)
     )
-    if user.role is Role.employee:
-        query = query.where(Expense.submitter_id == user.id)
+    if limit is not None:
+        query = query.limit(limit)
     return [expense_response(expense, submitter_name, item_name, item_unit, reviewer_name) for expense, submitter_name, reviewer_name, item_name, item_unit in db.execute(query).all()]
 
 
@@ -387,9 +427,25 @@ def set_expense_status(expense_id: uuid.UUID, payload: ExpenseStatusUpdate, db: 
 
 
 @app.get("/api/audit-logs", response_model=list[AuditResponse])
-def list_audit_logs(_: User = Depends(require_roles(Role.admin)), db: Session = Depends(get_db)):
+def list_audit_logs(
+    response: Response,
+    _: User = Depends(require_roles(Role.admin)),
+    db: Session = Depends(get_db),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Entries per page, newest first."),
+    offset: int = Query(0, ge=0),
+):
+    """One page of the relational audit trail. It is append-only and the one
+    table here that nothing ever prunes, so it outgrows every other."""
     actor = aliased(User)
-    query = select(AuditLog, actor.name).join(actor, AuditLog.actor_id == actor.id).order_by(AuditLog.created_at.desc())
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(AuditLog)))
+    query = (
+        select(AuditLog, actor.name)
+        .join(actor, AuditLog.actor_id == actor.id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        query = query.limit(limit)
     return [audit_response(audit, actor_name) for audit, actor_name in db.execute(query).all()]
 
 

@@ -82,11 +82,12 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
   record can never be missing.
 - **Stays fast when busy.** With 50 people using it at once, it handled 163 requests per
   second with zero errors, and the stock counts stayed correct.
-- **Holds up with a big warehouse.** Tried with 10,000 items in stock: the inventory
-  screen opens in about a sixth of a second, and finding something to issue is a search
-  box, not a 10,000-line dropdown. Working out what to reorder went from 3.3 seconds to
-  under one.
-- **Thoroughly tested.** 319 automated tests cover 95% of the code, plus 27 that drive the
+- **Holds up with a big warehouse.** Tried with 10,000 items in stock and 80,000 rows of
+  history: signing in used to download 31 MB — the entire warehouse — and now downloads
+  107 KB, because every screen asks for the page it is showing. The inventory screen opens
+  in about a sixth of a second, finding something to issue is a search box rather than a
+  10,000-line dropdown, and working out what to reorder went from 3.3 seconds to under one.
+- **Thoroughly tested.** 330 automated tests cover 95% of the code, plus 32 that drive the
   screens in a real browser, and every change is checked automatically before it goes in.
 
 ## About this project
