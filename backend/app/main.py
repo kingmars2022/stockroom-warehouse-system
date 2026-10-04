@@ -3,9 +3,9 @@ import uuid
 from datetime import datetime
 
 import boto3
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from .auth import get_current_user, require_roles
@@ -22,7 +22,7 @@ settings = get_settings()
 
 
 app = FastAPI(title="Stockroom API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"])
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"], expose_headers=["X-Total-Count"])
 
 
 def movement_response(movement: StockMovement, actor_name: str) -> MovementResponse:
@@ -89,9 +89,48 @@ def get_me(user: User = Depends(get_current_user)):
     return user
 
 
+# A LIKE pattern reads these three as syntax, so a search for "A-01" or a
+# stray "%" has to arrive as the characters the person typed.
+LIKE_ESCAPES = str.maketrans({"\\": "\\\\", "%": "\\%", "_": "\\_"})
+
+# A single page is capped so that one request cannot ask the server to build a
+# response the size of the whole catalogue.
+MAX_PAGE = 500
+
+
 @app.get("/api/items", response_model=list[ItemResponse])
-def list_items(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.scalars(select(Item).order_by(Item.name)).all()
+def list_items(
+    response: Response,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    search: str = Query("", max_length=200, description="Matches name, SKU, category, or storage location."),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Items per page. Omitted returns the whole catalogue."),
+    offset: int = Query(0, ge=0),
+):
+    """One page of the catalogue, with the full size in `X-Total-Count`.
+
+    `limit` is optional because the console still holds the catalogue to put a
+    name against the item id on a movement, a purchase and an expense row. A
+    warehouse with 10,000 SKUs has no business being sent all of them, and the
+    step that lets this cap become mandatory is carrying `item_name` on those
+    rows the way they already carry `actor_name`.
+    """
+    query = select(Item)
+    if search.strip():
+        pattern = f"%{search.strip().translate(LIKE_ESCAPES)}%"
+        query = query.where(or_(
+            Item.name.ilike(pattern, escape="\\"),
+            Item.sku.ilike(pattern, escape="\\"),
+            Item.category.ilike(pattern, escape="\\"),
+            Item.location.ilike(pattern, escape="\\"),
+        ))
+    # Counted before the window is applied, so a client can tell how far the
+    # pages run without walking them.
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(query.subquery())))
+    query = query.order_by(Item.name, Item.sku).offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+    return db.scalars(query).all()
 
 
 @app.post("/api/items", response_model=ItemResponse, status_code=status.HTTP_201_CREATED)

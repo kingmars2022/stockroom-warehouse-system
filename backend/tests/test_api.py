@@ -88,6 +88,82 @@ def test_listing_items_is_open_to_every_role(api, item):
     assert response.json()[0]["sku"] == item.sku
 
 
+def _catalogue(db, count: int, prefix: str = "PAGE") -> None:
+    """Names run opposite to insertion order, so a page that comes back sorted
+    by name can only have been sorted by the query."""
+    db.add_all([Item(sku=f"{prefix}-{index:03d}", name=f"Item {count - index:03d}", quantity_on_hand=10, minimum_quantity=1) for index in range(count)])
+    db.commit()
+
+
+def test_a_page_of_the_catalogue_reports_how_many_there_are_in_all(api, db):
+    """A console paging through 10,000 SKUs needs the size of the catalogue to
+    know how far the pages run, and cannot get it by counting what it was sent."""
+    _catalogue(db, 30)
+
+    response = api.get("/api/items", params={"limit": 10})
+
+    assert len(response.json()) == 10
+    assert response.headers["X-Total-Count"] == "30"
+
+
+def test_paging_walks_the_catalogue_once_without_repeating_or_skipping(api, db):
+    _catalogue(db, 25)
+
+    seen = []
+    for offset in (0, 10, 20):
+        seen += [row["name"] for row in api.get("/api/items", params={"limit": 10, "offset": offset}).json()]
+
+    assert len(seen) == 25
+    assert len(set(seen)) == 25, "a page boundary repeated or dropped a row"
+    assert seen == sorted(seen), "pages have to be cut from one order, or they overlap"
+
+
+def test_search_narrows_the_page_and_the_count_with_it(api, db):
+    _catalogue(db, 10)
+    db.add(Item(sku="FIND-1", name="Thermal label roll", category="Labels", location="C-04-02", quantity_on_hand=5, minimum_quantity=1))
+    db.commit()
+
+    response = api.get("/api/items", params={"search": "thermal"})
+
+    assert [row["sku"] for row in response.json()] == ["FIND-1"]
+    # Counted after the filter: the count has to describe the same set the
+    # pages are cut from, or the pager runs off the end of the results.
+    assert response.headers["X-Total-Count"] == "1"
+
+
+def test_search_matches_a_storage_location_as_typed(api, db):
+    """Aisle codes are what a picker reads off the shelf, and they contain the
+    character LIKE uses for a single-character wildcard."""
+    db.add_all([
+        Item(sku="LOC-1", name="On the shelf", location="C-04-02", quantity_on_hand=1, minimum_quantity=0),
+        Item(sku="LOC-2", name="Elsewhere", location="D-11-03", quantity_on_hand=1, minimum_quantity=0),
+    ])
+    db.commit()
+
+    assert [row["sku"] for row in api.get("/api/items", params={"search": "C-04"}).json()] == ["LOC-1"]
+    # "_" and "%" are the person's characters, not the pattern's.
+    assert api.get("/api/items", params={"search": "C_04"}).json() == []
+    assert api.get("/api/items", params={"search": "%"}).json() == []
+
+
+def test_a_single_request_cannot_ask_for_an_unbounded_page(api, db):
+    _catalogue(db, 3)
+
+    assert api.get("/api/items", params={"limit": 501}).status_code == 422
+    assert api.get("/api/items", params={"limit": 0}).status_code == 422
+    assert api.get("/api/items", params={"offset": -1}).status_code == 422
+
+
+def test_the_total_count_is_exposed_to_a_browser_on_another_origin(api, item):
+    """The console reads the count from the response header, and a cross-origin
+    fetch cannot see a header the server does not list as exposed."""
+    from app.main import app
+
+    cors = next(middleware for middleware in app.user_middleware if "CORSMiddleware" in str(middleware.cls))
+
+    assert "X-Total-Count" in cors.kwargs["expose_headers"]
+
+
 def test_admin_can_create_an_item(api, admin):
     response = api.act_as(admin).post("/api/items", json={"sku": "NEW-1", "name": "New item", "quantity_on_hand": 5, "minimum_quantity": 1})
 
