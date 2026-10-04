@@ -3,6 +3,11 @@
 A system that keeps track of a warehouse's supplies: who took what, what is running low, and
 what was bought, so the team stops running out of things.
 
+**[Open the live demo →](https://stockroom-warehouse-system.vercel.app)**  Sign in as
+`admin@stockroom.test`, `supervisor@stockroom.test` or `employee@stockroom.test` — the
+password is `Stockroom!2026`. Each role sees a different system. Nothing is saved: the
+warehouse lives in your browser and resets when you refresh.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 ## The problem
@@ -92,11 +97,13 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
 
 ## Try it
 
-The console runs on its own, with no backend and nothing to configure: build it
-with `NEXT_PUBLIC_DEMO=true` and it serves a seeded warehouse held in memory,
-which resets on refresh. Sign in as `admin@stockroom.test`,
-`supervisor@stockroom.test` or `employee@stockroom.test` — the password is
-`Stockroom!2026` — and each sees only what their role is allowed to.
+The demo above is the console running on its own: no backend, no database, no
+account to create. The warehouse it shows is seeded into memory in your
+browser, so you can issue stock, receive a purchase, approve a reimbursement
+and read the audit trail without touching anything — and a refresh puts it all
+back.
+
+To run the same thing yourself:
 
 ```bash
 npm install

@@ -1,6 +1,7 @@
 # Stockroom: technical overview
 
-[← Back to the project overview](README.md)
+[← Back to the project overview](README.md) ·
+[Open the live demo](https://stockroom-warehouse-system.vercel.app)
 
 A warehouse operations API and console: stock moves in and out under a lock that
 cannot go negative, purchases carry a price-change trail, reimbursements run
