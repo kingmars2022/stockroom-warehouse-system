@@ -106,7 +106,7 @@ tool-call trace, and "Review & approve" opens the ordinary purchase form
 pre-filled from the proposal rather than submitting anything on its own.
 
 ![Procurement agent proposing purchases](docs/screenshots/agent-proposals.png)
-![Purchase form pre-filled from an agent proposal](docs/screenshots/agent-review-approve.png)
+![The purchase form a proposal opens, with the engine's guidance for the chosen item](docs/screenshots/agent-review-approve.png)
 
 The provider sits behind a one-method interface, so the test suite drives the
 real loop and real tools with a scripted model: no API key, no network, no
