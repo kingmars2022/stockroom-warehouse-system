@@ -3,49 +3,15 @@
 Authentication is replaced with a dependency override so these tests cover
 routing, request validation, role guards, serialisation and status codes
 without needing a live Cognito user pool. The Cognito claim handling itself is
-covered directly in test_auth.py.
+covered directly in test_auth.py. The `api` client fixture lives in
+conftest.py, since more than one file drives the app over HTTP now.
 """
 
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
 
-from app.auth import get_current_user
-from app.db import get_db
-from app.main import app
 from app.models import ExpenseStatus, Item, MovementKind, Supplier, SupplierStatus
-
-
-class Api:
-    """Thin wrapper that lets a test switch the acting user mid-request."""
-
-    def __init__(self, client: TestClient, state: dict):
-        self._client = client
-        self._state = state
-
-    def act_as(self, user):
-        self._state["user"] = user
-        return self
-
-    def get(self, *args, **kwargs):
-        return self._client.get(*args, **kwargs)
-
-    def post(self, *args, **kwargs):
-        return self._client.post(*args, **kwargs)
-
-    def patch(self, *args, **kwargs):
-        return self._client.patch(*args, **kwargs)
-
-
-@pytest.fixture()
-def api(db, employee):
-    state = {"user": employee}
-    app.dependency_overrides[get_db] = lambda: db
-    app.dependency_overrides[get_current_user] = lambda: state["user"]
-    with TestClient(app) as client:
-        yield Api(client, state)
-    app.dependency_overrides.clear()
 
 
 # --------------------------------------------------------------------------

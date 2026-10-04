@@ -25,10 +25,25 @@ app = FastAPI(title="Stockroom API", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origin_list, allow_credentials=True, allow_methods=["GET", "POST", "PATCH", "DELETE"], allow_headers=["Authorization", "Content-Type"], expose_headers=["X-Total-Count"])
 
 
-def movement_response(movement: StockMovement, actor_name: str) -> MovementResponse:
+def item_label(db: Session, item_id: uuid.UUID | None) -> tuple[str | None, str | None]:
+    """The name and unit of the item a row is about.
+
+    The list endpoints join for this. A single row that was just written has
+    nothing to join against yet, so it reads them back by id -- one primary-key
+    lookup, usually already in the session's identity map.
+    """
+    if item_id is None:
+        return None, None
+    row = db.execute(select(Item.name, Item.unit).where(Item.id == item_id)).first()
+    return (row.name, row.unit) if row else (None, None)
+
+
+def movement_response(movement: StockMovement, actor_name: str, item_name: str, item_unit: str) -> MovementResponse:
     return MovementResponse(
         id=movement.id,
         item_id=movement.item_id,
+        item_name=item_name,
+        item_unit=item_unit,
         kind=movement.kind,
         quantity=movement.quantity,
         actor_id=movement.actor_id,
@@ -39,12 +54,32 @@ def movement_response(movement: StockMovement, actor_name: str) -> MovementRespo
     )
 
 
-def expense_response(expense: Expense, submitter_name: str, reviewer_name: str | None = None) -> ExpenseResponse:
+def purchase_response(purchase: Purchase, item_name: str, item_unit: str) -> PurchaseResponse:
+    return PurchaseResponse(
+        id=purchase.id,
+        item_id=purchase.item_id,
+        item_name=item_name,
+        item_unit=item_unit,
+        supplier_id=purchase.supplier_id,
+        received_by_id=purchase.received_by_id,
+        quantity=purchase.quantity,
+        unit_cost=purchase.unit_cost,
+        currency=purchase.currency,
+        invoice_number=purchase.invoice_number,
+        receipt_key=purchase.receipt_key,
+        price_change_percent=purchase.price_change_percent,
+        created_at=purchase.created_at,
+    )
+
+
+def expense_response(expense: Expense, submitter_name: str, item_name: str | None, item_unit: str | None, reviewer_name: str | None = None) -> ExpenseResponse:
     return ExpenseResponse(
         id=expense.id,
         submitter_id=expense.submitter_id,
         submitter_name=submitter_name,
         item_id=expense.item_id,
+        item_name=item_name,
+        item_unit=item_unit,
         supplier=expense.supplier,
         quantity=expense.quantity,
         amount=expense.amount,
@@ -151,16 +186,24 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User =
 @app.get("/api/movements", response_model=list[MovementResponse])
 def list_movements(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     actor = aliased(User)
-    query = select(StockMovement, actor.name).join(actor, StockMovement.actor_id == actor.id).order_by(StockMovement.created_at.desc())
+    query = (
+        select(StockMovement, actor.name, Item.name, Item.unit)
+        .join(actor, StockMovement.actor_id == actor.id)
+        # Inner join: the FK is ON DELETE RESTRICT, so a movement cannot
+        # outlive the item it moved.
+        .join(Item, StockMovement.item_id == Item.id)
+        .order_by(StockMovement.created_at.desc())
+    )
     if user.role is Role.employee:
         query = query.where(StockMovement.actor_id == user.id)
-    return [movement_response(movement, actor_name) for movement, actor_name in db.execute(query).all()]
+    return [movement_response(movement, actor_name, item_name, item_unit) for movement, actor_name, item_name, item_unit in db.execute(query).all()]
 
 
 @app.post("/api/movements", response_model=MovementResponse, status_code=status.HTTP_201_CREATED)
 def create_movement(payload: MovementCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     movement = record_movement(db, user, payload.item_id, payload.kind, payload.quantity, payload.recipient, payload.note)
-    return movement_response(movement, user.name)
+    item_name, item_unit = item_label(db, movement.item_id)
+    return movement_response(movement, user.name, item_name, item_unit)
 
 
 @app.get("/api/suppliers", response_model=list[SupplierResponse])
@@ -183,12 +226,15 @@ def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), user
 
 @app.get("/api/purchases", response_model=list[PurchaseResponse])
 def list_purchases(_: User = Depends(require_roles(Role.admin, Role.supervisor)), db: Session = Depends(get_db)):
-    return db.scalars(select(Purchase).order_by(Purchase.created_at.desc())).all()
+    query = select(Purchase, Item.name, Item.unit).join(Item, Purchase.item_id == Item.id).order_by(Purchase.created_at.desc())
+    return [purchase_response(purchase, item_name, item_unit) for purchase, item_name, item_unit in db.execute(query).all()]
 
 
 @app.post("/api/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED)
 def create_purchase(payload: PurchaseCreate, db: Session = Depends(get_db), user: User = Depends(require_roles(Role.admin, Role.supervisor))):
-    return record_purchase(db, user, **payload.model_dump())
+    purchase = record_purchase(db, user, **payload.model_dump())
+    item_name, item_unit = item_label(db, purchase.item_id)
+    return purchase_response(purchase, item_name, item_unit)
 
 
 @app.get("/api/price-policy")
@@ -211,27 +257,32 @@ def list_expenses(db: Session = Depends(get_db), user: User = Depends(get_curren
     submitter = aliased(User)
     reviewer = aliased(User)
     query = (
-        select(Expense, submitter.name, reviewer.name)
+        select(Expense, submitter.name, reviewer.name, Item.name, Item.unit)
         .join(submitter, Expense.submitter_id == submitter.id)
         .outerjoin(reviewer, Expense.reviewer_id == reviewer.id)
+        # Outer: a reimbursement need not name a catalogued item, and the FK
+        # is ON DELETE SET NULL, so one can lose the item it named.
+        .outerjoin(Item, Expense.item_id == Item.id)
         .order_by(Expense.created_at.desc())
     )
     if user.role is Role.employee:
         query = query.where(Expense.submitter_id == user.id)
-    return [expense_response(expense, submitter_name, reviewer_name) for expense, submitter_name, reviewer_name in db.execute(query).all()]
+    return [expense_response(expense, submitter_name, item_name, item_unit, reviewer_name) for expense, submitter_name, reviewer_name, item_name, item_unit in db.execute(query).all()]
 
 
 @app.post("/api/expenses", response_model=ExpenseResponse, status_code=status.HTTP_201_CREATED)
 def submit_expense(payload: ExpenseCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     expense = create_expense(db, user, **payload.model_dump())
-    return expense_response(expense, user.name)
+    item_name, item_unit = item_label(db, expense.item_id)
+    return expense_response(expense, user.name, item_name, item_unit)
 
 
 @app.patch("/api/expenses/{expense_id}/status", response_model=ExpenseResponse)
 def set_expense_status(expense_id: uuid.UUID, payload: ExpenseStatusUpdate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     expense = update_expense_status(db, user, expense_id, payload.status)
     submitter_name = db.scalar(select(User.name).where(User.id == expense.submitter_id))
-    return expense_response(expense, submitter_name, user.name if expense.reviewer_id else None)
+    item_name, item_unit = item_label(db, expense.item_id)
+    return expense_response(expense, submitter_name, item_name, item_unit, user.name if expense.reviewer_id else None)
 
 
 @app.get("/api/audit-logs", response_model=list[AuditResponse])

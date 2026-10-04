@@ -160,8 +160,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-297 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 19 browser tests driving the real console in Chromium.
+305 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 23 browser tests driving the real console in Chromium.
 
 ```
 Name                                         Stmts   Miss  Cover
@@ -169,7 +169,7 @@ Name                                         Stmts   Miss  Cover
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
 app/models.py                                  109      0   100%
-app/schemas.py                                 164      0   100%
+app/schemas.py                                 170      0   100%
 app/config.py                                   27      0   100%
 app/services.py                                243      1    99%
 lambdas/receipt_validator/handler.py            59      1    98%
@@ -177,12 +177,12 @@ app/agent/llm.py                                97      5    95%
 app/cache.py                                   141      7    95%
 lambdas/supplier_price_webhook/handler.py       80      4    95%
 app/agent/tools.py                              72      5    93%
-app/main.py                                    187     15    92%
+app/main.py                                    200     15    92%
 app/audit_events.py                            117     13    89%
 app/auth.py                                     75     16    79%
 app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1442     71    95%
+TOTAL                                         1461     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -272,12 +272,46 @@ one on the shelf is worse than either number. It is a search box over the
 catalogue now, showing the eight closest matches and matching the aisle code
 too, so a picker can find a row by what is printed on the rack.
 
-What is still linear: the console loads the whole catalogue on sign-in,
-because a movement, purchase or expense row identifies its item by id alone
-and the console resolves the name itself. `/api/items` takes `search`, `limit`
-and `offset` and reports the full size in `X-Total-Count` for a client that
-pages, but a page cannot become the default until those rows carry `item_name`
-the way they already carry `actor_name`.
+### A row names what it is about
+
+A movement, purchase and reimbursement each stored only the item's id, so the
+console put names on them by holding the whole catalogue — 2.55 MB of it at
+10,000 SKUs — and looking each row up. That is also wrong in the small: a row
+about an item outside whatever page the client holds has no name to show. All
+three now carry `item_name` and `item_unit`, joined in the same query that
+reads the rows, the way they already carried `actor_name`. The demo store runs
+the same join over its seed data so one set of components reads both.
+
+Driving the real API over that simulated warehouse, every row comes back named
+and each endpoint still costs one query — resolving a name per row would have
+traded a catalogue-sized response for a row-sized pile of queries, which is
+why there is a test that counts them:
+
+| endpoint | rows | body | queries | named |
+|---|---|---|---|---|
+| `/api/movements` | 50,000 | 16.00 MB | 1 | 50,000 / 50,000 |
+| `/api/purchases` | 30,000 | 12.16 MB | 1 | 30,000 / 30,000 |
+| `/api/expenses` | 2,000 | 0.95 MB | 1 | 1,800 / 2,000 |
+| `/api/items` | 10,000 | 2.55 MB | 2 | — |
+| `/api/items?limit=50` | 50 | 13 KB | 2 | — |
+
+The 1,800 of 2,000 is the point of the nullable column: a reimbursement need
+not be for a catalogued item, so that one alone is an outer join.
+
+What is still unbounded, and what the table above makes obvious: the 2.55 MB
+catalogue the console no longer needs is the smallest number on it.
+`/api/movements` and `/api/purchases` answer with the whole history, 16 MB and
+12 MB here, and they are now the dominant cost of signing in. They take the
+same `limit`/`offset` treatment next — the rows being self-describing is what
+makes it possible, and the tables already render a page at a time — but paging
+purchases also decides what the price-alert panel means, since it derives the
+alerts and each item's alternative prices from every purchase it has. That is
+a product question, not a query one.
+
+Two things still read the whole catalogue: the dashboard's totals (SKU count,
+units on hand, what is below its minimum), which want a summary endpoint rather
+than a list, and the item picker's search, which wants `/api/items?search=`
+instead of filtering in the browser.
 
 ## Run it
 

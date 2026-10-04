@@ -86,7 +86,7 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
   screen opens in about a sixth of a second, and finding something to issue is a search
   box, not a 10,000-line dropdown. Working out what to reorder went from 3.3 seconds to
   under one.
-- **Thoroughly tested.** 297 automated tests cover 95% of the code, plus 19 that drive the
+- **Thoroughly tested.** 305 automated tests cover 95% of the code, plus 23 that drive the
   screens in a real browser, and every change is checked automatically before it goes in.
 
 ## About this project

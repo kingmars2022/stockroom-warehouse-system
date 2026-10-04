@@ -14,13 +14,16 @@ os.environ["RECEIPT_BUCKET_NAME"] = ""
 os.environ["MONGO_URL"] = ""
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.audit_events import InMemoryEventStore, set_event_store
+from app.auth import get_current_user
 from app.cache import Cache, InMemoryBackend, set_cache
-from app.db import Base
+from app.db import Base, get_db
+from app.main import app
 from app.models import Item, Role, Supplier, SupplierStatus, User
 
 
@@ -92,3 +95,34 @@ def supplier(db):
     db.add(record)
     db.commit()
     return record
+
+
+class Api:
+    """Thin wrapper that lets a test switch the acting user mid-request."""
+
+    def __init__(self, client: TestClient, state: dict):
+        self._client = client
+        self._state = state
+
+    def act_as(self, user):
+        self._state["user"] = user
+        return self
+
+    def get(self, *args, **kwargs):
+        return self._client.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self._client.post(*args, **kwargs)
+
+    def patch(self, *args, **kwargs):
+        return self._client.patch(*args, **kwargs)
+
+
+@pytest.fixture()
+def api(db, employee):
+    state = {"user": employee}
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_current_user] = lambda: state["user"]
+    with TestClient(app) as client:
+        yield Api(client, state)
+    app.dependency_overrides.clear()

@@ -51,6 +51,11 @@ class MovementCreate(BaseModel):
 class MovementResponse(ORMModel):
     id: UUID
     item_id: UUID
+    # The row carries what it is about. Without this a reader has to hold the
+    # whole catalogue to put a name against the id, which is the one thing a
+    # warehouse with 10,000 SKUs cannot afford to send.
+    item_name: str
+    item_unit: str
     kind: MovementKind
     quantity: int
     actor_id: UUID
@@ -91,6 +96,8 @@ class PurchaseCreate(BaseModel):
 class PurchaseResponse(ORMModel):
     id: UUID
     item_id: UUID
+    item_name: str
+    item_unit: str
     supplier_id: UUID
     received_by_id: UUID
     quantity: int
@@ -118,6 +125,10 @@ class ExpenseResponse(ORMModel):
     submitter_id: UUID
     submitter_name: str
     item_id: UUID | None
+    # Nullable here alone: a reimbursement need not be for a catalogued item,
+    # and the FK is ON DELETE SET NULL rather than RESTRICT.
+    item_name: str | None
+    item_unit: str | None
     supplier: str
     quantity: int
     amount: float

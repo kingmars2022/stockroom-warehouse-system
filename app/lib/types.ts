@@ -43,6 +43,8 @@ export interface SupplierResponse {
 export interface MovementResponse {
   id: string;
   item_id: string;
+  item_name: string;
+  item_unit: string;
   kind: MovementKind;
   quantity: number;
   actor_id: string;
@@ -55,6 +57,8 @@ export interface MovementResponse {
 export interface PurchaseResponse {
   id: string;
   item_id: string;
+  item_name: string;
+  item_unit: string;
   supplier_id: string;
   received_by_id: string;
   quantity: number;
@@ -71,6 +75,10 @@ export interface ExpenseResponse {
   submitter_id: string;
   submitter_name: string;
   item_id: string | null;
+  // Null where the others are not: a reimbursement need not be for a
+  // catalogued item.
+  item_name: string | null;
+  item_unit: string | null;
   supplier: string;
   quantity: number;
   amount: number;
