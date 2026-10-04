@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { go, setDarkMode, signIn } from './helpers';
+import { go, pickItem, setDarkMode, signIn } from './helpers';
 
 test.beforeEach(async ({ page }) => {
   await signIn(page);
@@ -41,7 +41,7 @@ test('the callouts go dark with the rest of the console', async ({ page }) => {
   await setDarkMode(page);
   await go(page, 'Inventory');
   await page.click('button:has-text("Issue stock")');
-  await page.selectOption('select[name="item"]', { index: 1 });
+  await pickItem(page, 'USB-C charging cable');
 
   await expect(page.locator('.pick-path')).toHaveCSS('background-color', DARK_FILL);
 });
@@ -50,7 +50,7 @@ test('the purchase guidance keeps the recommended supplier distinct in dark mode
   await setDarkMode(page);
   await go(page, 'Procurement');
   await page.click('button:has-text("Receive purchase")');
-  await page.selectOption('select[name="item"]', { label: '4 x 6 shipping labels' });
+  await pickItem(page, '4 x 6 shipping labels');
 
   const advice = page.locator('.supplier-advice');
   await expect(advice).toHaveCSS('background-color', 'rgb(23, 37, 29)');

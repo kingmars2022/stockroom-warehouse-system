@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { go, signIn } from './helpers';
+import { go, pickItem, signIn } from './helpers';
 
 /**
  * Receiving stock without a purchase — a return, a transfer in, a correction.
@@ -23,7 +23,7 @@ test('the receive dialog opens and is told apart from receiving a purchase', asy
 
 test('it says where to put the stock away, not where to pick it', async ({ page }) => {
   await page.click('button:has-text("Receive stock")');
-  await page.selectOption('select[name="item"]', { index: 1 });
+  await pickItem(page, 'USB-C charging cable');
 
   await expect(page.locator('.pick-path')).toContainText('Put away at');
   await expect(page.locator('.pick-path')).toContainText('Aisle A · Bay 01 · Level 02');
@@ -36,7 +36,7 @@ test('receiving adds to the quantity on hand and records who it came from', asyn
   const before = Number((await row.locator('td').nth(2).innerText()).match(/\d+/)![0]);
 
   await page.click('button:has-text("Receive stock")');
-  await page.selectOption('select[name="item"]', { label: `USB-C charging cable (${before} pcs available)` });
+  await pickItem(page, 'USB-C charging cable');
   await page.fill('input[name="qty"]', '14');
   await page.fill('input[name="recipient"]', 'Northstar Supply');
   await page.fill('input[name="note"]', 'Returned from the Design team');

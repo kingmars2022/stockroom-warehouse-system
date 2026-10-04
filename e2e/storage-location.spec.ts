@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { addItem, go, locationCell, signIn } from './helpers';
+import { addItem, go, locationCell, pickItem, signIn } from './helpers';
 
 /**
  * Storage codes are aisle-bay-level. The code is what is printed on the rack,
@@ -28,7 +28,7 @@ test('issuing stock says where to pick from', async ({ page }) => {
   // Nothing to say until an item is chosen.
   await expect(page.locator('.pick-path')).toHaveCount(0);
 
-  await page.selectOption('select[name="item"]', { index: 1 });
+  await pickItem(page, 'USB-C charging cable');
   await expect(page.locator('.pick-path')).toContainText('Pick from');
   await expect(page.locator('.pick-path')).toContainText('Aisle A · Bay 01 · Level 02');
 });
@@ -38,10 +38,10 @@ test('the pick line follows the item, not the first one chosen', async ({ page }
   await page.click('button:has-text("Issue stock")');
   await page.getByText('Issue stock').first().waitFor();
 
-  await page.selectOption('select[name="item"]', { label: 'A4 copy paper (12 reams available)' });
+  await pickItem(page, 'A4 copy paper');
   await expect(page.locator('.pick-path')).toContainText('Aisle B · Bay 03 · Level 01');
 
-  await page.selectOption('select[name="item"]', { label: 'Disinfecting wipes (54 packs available)' });
+  await pickItem(page, 'Disinfecting wipes');
   await expect(page.locator('.pick-path')).toContainText('Aisle D · Bay 01 · Level 03');
 });
 
