@@ -41,7 +41,11 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
 
 1. **Take an item by scanning it.** Open "Issue stock", scan the barcode with your camera,
    and enter how many you're taking and for which team. The count updates right away.
-2. **Get paid back.** Bought something urgent yourself? Submit the receipt and follow its
+2. **Be told where to walk.** Once you pick the item, the screen spells out its spot the way
+   the racks are labelled — *Aisle C · Bay 04 · Level 02* — with the raw code beside it, so
+   you can read it off the shelf. A location that doesn't follow that pattern is shown exactly
+   as it was typed rather than forced into a shape it hasn't got.
+3. **Get paid back.** Bought something urgent yourself? Submit the receipt and follow its
    status until it is paid.
 
 ![Issue stock](docs/screenshots/issue-stock.png)
@@ -55,7 +59,10 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
 3. **Ask the assistant.** Ask "What should I reorder this week?" The AI assistant suggests
    specific orders and explains why. You review each one before anything is ordered.
 4. **Get warned about price increases.** If a supplier raises a price past the limit you set,
-   you get an alert.
+   you get an alert — and the alert shows what the *other* suppliers last charged for the same
+   item, so the next decision is right there.
+5. **Take in stock that didn't come from an order,** like a return or a transfer from another
+   site, without inventing a purchase to explain it.
 
 ![Procurement](docs/screenshots/procurement.png)
 
@@ -95,23 +102,19 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
 - **Thoroughly tested.** 334 automated tests cover 95% of the code, plus 34 that drive the
   screens in a real browser, and every change is checked automatically before it goes in.
 
-## Try it
+## Run the demo yourself
 
-The demo above is the console running on its own: no backend, no database, no
-account to create. The warehouse it shows is seeded into memory in your
-browser, so you can issue stock, receive a purchase, approve a reimbursement
-and read the audit trail without touching anything — and a refresh puts it all
-back.
-
-To run the same thing yourself:
+The demo at the top is the console on its own: no backend, no database, no account to create.
+The warehouse lives in the browser, so you can issue stock, receive a purchase, approve a
+reimbursement and read the audit trail without touching anything real.
 
 ```bash
 npm install
 NEXT_PUBLIC_DEMO=true npm run build && npm start
 ```
 
-Demo mode switches itself off the moment a Cognito user pool is configured, so
-a real deployment cannot land in it by accident.
+Demo mode switches itself off the moment a Cognito user pool is configured, so a real
+deployment cannot land in it by accident.
 
 ## About this project
 
