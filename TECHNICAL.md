@@ -17,7 +17,7 @@ through an approval chain, and every state change lands in an audit log.
 flowchart LR
     B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>22 endpoints"]
     A -->|"verify RS256 via JWKS"| C["AWS Cognito"]
-    A -->|"SELECT … FOR UPDATE"| D[("PostgreSQL<br/>8 tables")]
+    A -->|"SELECT … FOR UPDATE"| D[("PostgreSQL<br/>9 tables")]
     A -->|"read-through cache"| R[("Redis")]
     A -->|"presigned PUT/GET"| S["S3 receipts"]
     A -->|"publish on commit"| M[("MongoDB<br/>audit events")]
@@ -34,7 +34,7 @@ flowchart LR
 | Layer | Built with |
 |---|---|
 | API | Python, FastAPI, SQLAlchemy, Alembic |
-| Data | PostgreSQL (8 tables), MongoDB audit events, Redis cache |
+| Data | PostgreSQL (9 tables), MongoDB audit events, Redis cache |
 | Auth | AWS Cognito JWT — RS256 via JWKS, groups mapped to 3 roles |
 | Console | Next.js, TypeScript, React |
 | Serverless | AWS Lambda (receipt validation, price webhook), API Gateway |
