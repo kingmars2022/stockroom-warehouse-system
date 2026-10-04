@@ -358,11 +358,12 @@ http://localhost:8000/docs
 | `GET` | `/api/me` | Any authenticated user | Current authenticated profile |
 | `GET` | `/api/items` | Any authenticated user | Inventory catalog; `search`, `limit`, `offset`, full size in `X-Total-Count` |
 | `POST` | `/api/items` | Admin | Create inventory item |
-| `GET` | `/api/movements` | Any authenticated user | Movements, each naming its item; employee scope is limited to their own actions |
+| `GET` | `/api/movements` | Any authenticated user | One page of movements, each naming its item; `limit`, `offset`, `X-Total-Count`; employee scope is limited to their own actions |
 | `POST` | `/api/movements` | Any authenticated user | Record inbound/outbound stock movement; employees cannot receive stock |
 | `GET` | `/api/suppliers` | Admin, supervisor | Supplier list |
 | `POST` | `/api/suppliers` | Admin | Create supplier |
-| `GET` | `/api/purchases` | Admin, supervisor | Purchase history |
+| `GET` | `/api/purchases` | Admin, supervisor | One page of purchase history; `limit`, `offset`, `X-Total-Count` |
+| `GET` | `/api/price-alerts` | Admin, supervisor | Purchases past the alert threshold, each with what the other suppliers last charged |
 | `POST` | `/api/purchases` | Admin, supervisor | Receive purchase and update stock |
 | `GET` | `/api/price-policy` | Admin, supervisor | Read price-increase threshold |
 | `PATCH` | `/api/price-policy` | Admin | Update price-increase threshold |

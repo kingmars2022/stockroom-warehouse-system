@@ -10,7 +10,7 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request(path: string, init: RequestInit = {}): Promise<Response> {
   const token = await idToken();
   const response = await fetch(`${apiUrl}${path}`, {
     ...init,
@@ -20,7 +20,28 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     const body = await response.json().catch(() => ({})) as { detail?: string };
     throw new ApiError(response.status, body.detail || 'The server could not complete this request.');
   }
+  return response;
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await request(path, init);
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
+}
+
+/**
+ * One page of a list endpoint, with the length of the whole list beside it.
+ *
+ * The length arrives in X-Total-Count, which a cross-origin reader can only
+ * see because the API lists it in its CORS expose_headers. A proxy that
+ * stripped it would otherwise leave every pager convinced there is exactly one
+ * page, so a missing header falls back to what this page actually holds —
+ * which may understate the total but never invents one.
+ */
+export async function apiPage<T>(path: string, limit: number, offset: number): Promise<{ rows: T[]; total: number }> {
+  const response = await request(`${path}${path.includes('?') ? '&' : '?'}limit=${limit}&offset=${offset}`);
+  const rows = await response.json() as T[];
+  const total = Number(response.headers.get('X-Total-Count'));
+  return { rows, total: Number.isFinite(total) && total > 0 ? total : offset + rows.length };
 }
 
 // The API answers 409 for two unrelated situations: a receipt that has not

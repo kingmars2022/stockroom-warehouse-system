@@ -109,6 +109,27 @@ class PurchaseResponse(ORMModel):
     created_at: datetime
 
 
+class PriceAlternative(BaseModel):
+    """What another supplier last charged for the same item."""
+
+    supplier_id: UUID
+    supplier_name: str
+    unit_cost: float
+    currency: str
+
+
+class PriceAlertResponse(PurchaseResponse):
+    """A purchase whose price rose past the configured threshold.
+
+    The alternatives travel with it. The console used to work them out by
+    scanning every purchase it held, which stops being true the moment the
+    purchase list is a page rather than the whole history.
+    """
+
+    supplier_name: str
+    alternatives: list[PriceAlternative]
+
+
 class ExpenseCreate(BaseModel):
     item_id: UUID | None = None
     supplier: str = Field(min_length=2, max_length=200)

@@ -70,6 +70,23 @@ export interface PurchaseResponse {
   created_at: string;
 }
 
+export interface PriceAlternativeResponse {
+  supplier_id: string;
+  supplier_name: string;
+  unit_cost: number;
+  currency: string;
+}
+
+/**
+ * A purchase over the threshold, with what the other suppliers last charged.
+ * The console used to work both out by filtering every purchase it had been
+ * sent, which stopped being possible once that list became a page.
+ */
+export interface PriceAlertResponse extends PurchaseResponse {
+  supplier_name: string;
+  alternatives: PriceAlternativeResponse[];
+}
+
 export interface ExpenseResponse {
   id: string;
   submitter_id: string;

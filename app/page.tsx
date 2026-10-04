@@ -7,10 +7,10 @@ import {
   ScanBarcode, Settings2, TrendingDown, TrendingUp, TriangleAlert, X, XCircle,
 } from 'lucide-react';
 import { FormEvent, ReactNode, createContext, useCallback, useContext, useEffect, useId, useMemo, useState } from 'react';
-import { ApiError, api, withReceipt } from './lib/api';
+import { ApiError, api, apiPage, withReceipt } from './lib/api';
 import type {
   AgentProposal, AgentRunResponse, AuditEventResponse, AuditResponse, ExpenseResponse, ItemResponse, MeResponse, MovementResponse,
-  PricePolicyResponse, PurchaseResponse, ReplenishmentResponse, SupplierPriceIngestResponse, SupplierRecommendation, SupplierResponse,
+  PriceAlertResponse, PricePolicyResponse, PurchaseResponse, ReplenishmentResponse, SupplierPriceIngestResponse, SupplierRecommendation, SupplierResponse,
 } from './lib/types';
 import {
   authenticate,
@@ -41,10 +41,15 @@ type Supplier = { id: string; name: string; contact: string; leadDays: number; r
 type Movement = { id: string; kind: Kind; itemId: string; itemName: string; itemUnit: string; qty: number; actor: string; recipient: string; note: string; at: string };
 type Purchase = { id: string; itemId: string; itemName: string; itemUnit: string; supplierId: string; qty: number; unitCost: number; currency: string; receipt: string; receiptUrl?: string; invoice: string; at: string; priceChange: number };
 type Expense = { id: string; submitter: string; itemId: string; itemName: string; itemUnit: string; supplier: string; qty: number; amount: number; currency: string; receipt: string; receiptUrl?: string; purpose: string; status: ExpenseStatus; at: string; reviewer?: string };
+type PriceAlternative = { supplierId: string; supplierName: string; unitCost: number; currency: string };
+// An alert travels with what the other suppliers last charged, because the
+// purchase list it used to be filtered out of is now a page of history.
+type PriceAlert = Purchase & { supplierName: string; alternatives: PriceAlternative[] };
 type ItemNames = 'itemName' | 'itemUnit';
 // The demo seed writes its rows the way the database stores them: an item id
 // and nothing else. `nameItems` plays the part of the join.
-type SeedStore = Omit<Store, 'movements' | 'purchases' | 'expenses'> & { movements: Omit<Movement, ItemNames>[]; purchases: Omit<Purchase, ItemNames>[]; expenses: Omit<Expense, ItemNames>[] };
+type Derived = 'movementTotal' | 'purchaseTotal' | 'priceAlerts' | 'priceAlertTotal' | 'replenishment';
+type SeedStore = Omit<Store, 'movements' | 'purchases' | 'expenses' | Derived> & { movements: Omit<Movement, ItemNames>[]; purchases: Omit<Purchase, ItemNames>[]; expenses: Omit<Expense, ItemNames>[] };
 // quantity/priceChangePercent are demo-only stand-ins for the fields the real
 // MongoDB audit-event payload carries, so the structured-search demo below has
 // real fields to filter on instead of only prose.
@@ -52,11 +57,17 @@ type Audit = { id: string; actor: string; role: Role; action: string; target: st
 type User = { email: string; password?: string; name: string; role: Role; scope: string };
 type SupplierAdvice = { supplierId: string; supplierName: string; unitCost: number; currency: string; leadDays: number; rating: number; score: number };
 type Replenishment = { itemId: string; itemName: string; sku: string; unit: string; quantityOnHand: number; dailyUsage: number; daysOfCover: number | null; suggestedQuantity: number; recommendedSupplier: SupplierAdvice | null; alternatives: SupplierAdvice[] };
-type Store = { items: Item[]; suppliers: Supplier[]; movements: Movement[]; purchases: Purchase[]; expenses: Expense[]; audits: Audit[]; replenishment: Replenishment[]; threshold: number; defaultAppearance: Appearance };
+// movements and purchases hold the page being read, not the history; the
+// totals beside them come from the response's X-Total-Count so the pager can
+// say where in 50,000 rows it is.
+type Store = { items: Item[]; suppliers: Supplier[]; movements: Movement[]; movementTotal: number; purchases: Purchase[]; purchaseTotal: number; priceAlerts: PriceAlert[]; priceAlertTotal: number; expenses: Expense[]; audits: Audit[]; replenishment: Replenishment[]; threshold: number; defaultAppearance: Appearance };
 
 const roleLabel: Record<Role, string> = { admin: 'Administrator', supervisor: 'Supervisor', employee: 'Employee' };
 const roleKey: Record<Role, string> = { admin: 'administrator', supervisor: 'supervisor', employee: 'employee' };
 const defaultAppearance: Appearance = { mode: 'system', accent: 'green', density: 'comfortable' };
+// One screenful of a table. Long tables render this many rows; the two whose
+// history is unbounded ask the server for this many at a time.
+const PAGE_SIZE = 50;
 const money = (value: number, currency = 'CAD') => new Intl.NumberFormat('en-CA', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
 const date = (value: string) => new Intl.DateTimeFormat('en-CA', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
@@ -85,7 +96,6 @@ function LanguageSelect() { const { locale, setLocale, t } = useI18n(); return <
 const seed: SeedStore = {
   threshold: 15,
   defaultAppearance,
-  replenishment: [],
   items: [
     { id: 'cable', sku: 'EL-CBL-001', name: 'USB-C charging cable', category: 'Electronics', location: 'A-01-02', qty: 86, min: 20, unit: 'pcs' },
     { id: 'paper', sku: 'ST-PPR-002', name: 'A4 copy paper', category: 'Office', location: 'B-03-01', qty: 12, min: 20, unit: 'reams' },
@@ -140,8 +150,8 @@ const demoAccounts: User[] = [
   { email: 'employee@stockroom.test', password: 'Stockroom!2026', name: 'Alex Chen', role: 'employee', scope: 'Own stock issues and reimbursements' },
 ];
 const localDemoAuth = process.env.NODE_ENV === 'development' && !process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID && !process.env.NEXT_PUBLIC_COGNITO_APP_CLIENT_ID;
-const emptyStore = (): Store => ({ items: [], suppliers: [], movements: [], purchases: [], expenses: [], audits: [], replenishment: [], threshold: 15, defaultAppearance });
-function demoReplenishment(store: Store): Replenishment[] {
+const emptyStore = (): Store => ({ items: [], suppliers: [], movements: [], movementTotal: 0, purchases: [], purchaseTotal: 0, priceAlerts: [], priceAlertTotal: 0, expenses: [], audits: [], replenishment: [], threshold: 15, defaultAppearance });
+function demoReplenishment(store: Omit<Store, Derived>): Replenishment[] {
   const recommendations = store.items.reduce<Replenishment[]>((result, item) => {
     const issued = store.movements.filter(movement => movement.kind === 'outbound' && movement.itemId === item.id).reduce((sum, movement) => sum + movement.qty, 0);
     const dailyUsage = issued ? Number((issued / 30).toFixed(2)) : item.qty <= item.min ? Number((item.min / 30).toFixed(2)) : 0;
@@ -156,7 +166,29 @@ function demoReplenishment(store: Store): Replenishment[] {
   }, []);
   return recommendations.sort((a, b) => (a.daysOfCover ?? 999) - (b.daysOfCover ?? 999));
 }
-function nameItems(store: SeedStore): Store {
+/**
+ * What /api/price-alerts answers, worked out over the demo store.
+ *
+ * Mirrors the server deliberately: the latest price per *other* supplier for
+ * the same item, newest first, at most two. The console used to filter its
+ * whole purchase list for this, which a page of history cannot answer.
+ */
+function demoPriceAlerts(store: Omit<Store, Derived>): PriceAlert[] {
+  const supplierName = (supplierId: string) => store.suppliers.find(entry => entry.id === supplierId)?.name || '';
+  return store.purchases.filter(purchase => purchase.priceChange >= store.threshold).map(purchase => {
+    const latest = new Map<string, Purchase>();
+    store.purchases
+      .filter(entry => entry.itemId === purchase.itemId && entry.supplierId !== purchase.supplierId)
+      .forEach(entry => { const held = latest.get(entry.supplierId); if (!held || entry.at > held.at) latest.set(entry.supplierId, entry); });
+    const alternatives = [...latest.values()]
+      .sort((first, second) => (first.at < second.at ? 1 : -1))
+      .slice(0, 2)
+      .map(entry => ({ supplierId: entry.supplierId, supplierName: supplierName(entry.supplierId), unitCost: entry.unitCost, currency: entry.currency }));
+    return { ...purchase, supplierName: supplierName(purchase.supplierId), alternatives };
+  });
+}
+
+function nameItems(store: SeedStore): Omit<Store, Derived> {
   const label = (itemId: string) => {
     const item = store.items.find(entry => entry.id === itemId);
     return { itemName: item?.name || '', itemUnit: item?.unit || '' };
@@ -168,8 +200,21 @@ function nameItems(store: SeedStore): Store {
     expenses: store.expenses.map(expense => ({ ...expense, ...label(expense.itemId) })),
   };
 }
-const copyDemoStore = (): Store => { const value = nameItems(JSON.parse(JSON.stringify(seed)) as SeedStore); return { ...value, replenishment: demoReplenishment(value) }; };
-const withDemoForecast = (store: Store): Store => ({ ...store, replenishment: demoReplenishment(store) });
+// Demo mode holds everything in memory, so the figures the server derives have
+// to be re-derived here after every write -- the forecast, the price alerts, and
+// the totals a pager reads.
+const withDemoDerived = (store: Omit<Store, Derived>): Store => {
+  const priceAlerts = demoPriceAlerts(store);
+  return { ...store, replenishment: demoReplenishment(store), priceAlerts, priceAlertTotal: priceAlerts.length, movementTotal: store.movements.length, purchaseTotal: store.purchases.length };
+};
+const copyDemoStore = (): Store => withDemoDerived(nameItems(JSON.parse(JSON.stringify(seed)) as SeedStore));
+
+// The API speaks snake_case and the console camelCase. These sit at module
+// level because a page fetched by the pager has to be mapped the same way the
+// one fetched on sign-in was.
+const toMovement = (movement: MovementResponse): Movement => ({ id: movement.id, kind: movement.kind, itemId: movement.item_id, itemName: movement.item_name, itemUnit: movement.item_unit, qty: movement.quantity, actor: movement.actor_name, recipient: movement.recipient, note: movement.note, at: movement.created_at });
+const toPurchase = (purchase: PurchaseResponse): Purchase => ({ id: purchase.id, itemId: purchase.item_id, itemName: purchase.item_name, itemUnit: purchase.item_unit, supplierId: purchase.supplier_id, qty: purchase.quantity, unitCost: Number(purchase.unit_cost), currency: purchase.currency, receipt: purchase.receipt_key || 'No attachment', invoice: purchase.invoice_number, at: purchase.created_at, priceChange: purchase.price_change_percent });
+const toPriceAlert = (alert: PriceAlertResponse): PriceAlert => ({ ...toPurchase(alert), supplierName: alert.supplier_name, alternatives: alert.alternatives.map(option => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency })) });
 
 function stored<T>(key: string, fallback: T): T { if (typeof window === 'undefined') return fallback; try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; } }
 function initials(name: string) { return name.split(' ').map(part => part[0]).join('').slice(0, 2); }
@@ -184,6 +229,8 @@ export default function Home() {
   const [view, setView] = useState<View>('dashboard');
   const [search, setSearch] = useState('');
   const [lowOnly, setLowOnly] = useState(false);
+  const [movementPageIndex, setMovementPageIndex] = useState(0);
+  const [purchasePageIndex, setPurchasePageIndex] = useState(0);
   const [dialog, setDialog] = useState<'issue' | 'receive' | 'purchase' | 'expense' | 'item' | null>(null);
   const [purchaseSeed, setPurchaseSeed] = useState<{ itemId: string; supplierId: string; quantity: number } | null>(null);
   const [menu, setMenu] = useState(false);
@@ -214,17 +261,25 @@ export default function Home() {
     const current = await api<MeResponse>('/api/me');
     const nextUser: User = { ...current, scope: current.role === 'admin' ? 'All warehouses and financial data' : current.role === 'supervisor' ? 'Warehouse operations and purchasing' : 'Own stock issues and reimbursements' };
     const [items, movements, expenses] = await Promise.all([
-      api<ItemResponse[]>('/api/items'), api<MovementResponse[]>('/api/movements'), api<ExpenseResponse[]>('/api/expenses'),
+      api<ItemResponse[]>('/api/items'),
+      // The newest page, not the history. Unpaged this answered with every
+      // movement ever recorded -- 16 MB at a 50,000-row history.
+      apiPage<MovementResponse>('/api/movements', PAGE_SIZE, 0),
+      api<ExpenseResponse[]>('/api/expenses'),
     ]);
     const restricted = current.role === 'employee';
     // Employees cannot read supplier, purchase, audit or replenishment data, so
     // the restricted branch supplies empty collections rather than calling
     // endpoints that would return 403.
-    const restrictedDefaults: [SupplierResponse[], PurchaseResponse[], PricePolicyResponse, AuditResponse[], ReplenishmentResponse[]] =
-      [[], [], { threshold_percent: 15 }, [], []];
-    const [suppliers, purchases, policy, audits, replenishment] = restricted ? restrictedDefaults : await Promise.all([
+    const restrictedDefaults: [SupplierResponse[], { rows: PurchaseResponse[]; total: number }, { rows: PriceAlertResponse[]; total: number }, PricePolicyResponse, AuditResponse[], ReplenishmentResponse[]] =
+      [[], { rows: [], total: 0 }, { rows: [], total: 0 }, { threshold_percent: 15 }, [], []];
+    const [suppliers, purchases, alerts, policy, audits, replenishment] = restricted ? restrictedDefaults : await Promise.all([
       api<SupplierResponse[]>('/api/suppliers'),
-      api<PurchaseResponse[]>('/api/purchases'),
+      apiPage<PurchaseResponse>('/api/purchases', PAGE_SIZE, 0),
+      // Derived server-side now. A page of purchases cannot be filtered into
+      // the alerts, and a page's worth of alerts is not the count the
+      // dashboard puts on a card.
+      apiPage<PriceAlertResponse>('/api/price-alerts', PAGE_SIZE, 0),
       api<PricePolicyResponse>('/api/price-policy'),
       current.role === 'admin' ? api<AuditResponse[]>('/api/audit-logs') : Promise.resolve<AuditResponse[]>([]),
       api<ReplenishmentResponse[]>('/api/replenishment-recommendations'),
@@ -233,14 +288,22 @@ export default function Home() {
     setStore({
       items: items.map(item => ({ id: item.id, sku: item.sku, name: item.name, category: item.category, location: item.location, qty: item.quantity_on_hand, min: item.minimum_quantity, unit: item.unit })),
       suppliers: suppliers.map(supplier => ({ id: supplier.id, name: supplier.name, contact: supplier.contact, leadDays: supplier.lead_days, rating: supplier.rating, status: supplier.status })),
-      movements: movements.map(movement => ({ id: movement.id, kind: movement.kind, itemId: movement.item_id, itemName: movement.item_name, itemUnit: movement.item_unit, qty: movement.quantity, actor: movement.actor_name, recipient: movement.recipient, note: movement.note, at: movement.created_at })),
-      purchases: purchases.map(purchase => ({ id: purchase.id, itemId: purchase.item_id, itemName: purchase.item_name, itemUnit: purchase.item_unit, supplierId: purchase.supplier_id, qty: purchase.quantity, unitCost: Number(purchase.unit_cost), currency: purchase.currency, receipt: purchase.receipt_key || 'No attachment', invoice: purchase.invoice_number, at: purchase.created_at, priceChange: purchase.price_change_percent })),
+      movements: movements.rows.map(toMovement),
+      movementTotal: movements.total,
+      purchases: purchases.rows.map(toPurchase),
+      purchaseTotal: purchases.total,
+      priceAlerts: alerts.rows.map(toPriceAlert),
+      priceAlertTotal: alerts.total,
       expenses: expenses.map(expense => ({ id: expense.id, submitter: expense.submitter_name, itemId: expense.item_id || '', itemName: expense.item_name || '', itemUnit: expense.item_unit || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_name || undefined })),
       audits: audits.map(audit => ({ id: audit.id, actor: audit.actor_name, role: audit.actor_role, action: audit.action, target: audit.target_type, detail: audit.detail, at: audit.created_at })),
       replenishment: replenishment.map(recommendation => ({ itemId: recommendation.item_id, itemName: recommendation.item_name, sku: recommendation.sku, unit: recommendation.unit, quantityOnHand: recommendation.quantity_on_hand, dailyUsage: recommendation.daily_usage, daysOfCover: recommendation.days_of_cover, suggestedQuantity: recommendation.suggested_quantity, recommendedSupplier: recommendation.recommended_supplier ? { supplierId: recommendation.recommended_supplier.supplier_id, supplierName: recommendation.recommended_supplier.supplier_name, unitCost: Number(recommendation.recommended_supplier.unit_cost), currency: recommendation.recommended_supplier.currency, leadDays: recommendation.recommended_supplier.lead_days, rating: recommendation.recommended_supplier.rating, score: recommendation.recommended_supplier.score } : null, alternatives: recommendation.alternatives.map((option: SupplierRecommendation) => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency, leadDays: option.lead_days, rating: option.rating, score: option.score })) })),
       threshold: policy.threshold_percent,
       defaultAppearance,
     });
+    // Both histories were just re-read from the top; leaving the indexes where
+    // they were would label page one as page four.
+    setMovementPageIndex(0);
+    setPurchasePageIndex(0);
   }, []);
   // Loads the session and dashboard data once on mount. Every state update
   // inside `refresh` happens after an await, and the catch/finally handlers run
@@ -282,7 +345,35 @@ export default function Home() {
   const visibleExpenses = localDemoAuth && user?.role === 'employee' ? store.expenses.filter(expense => expense.submitter === user.name) : store.expenses;
   const items = useMemo(() => store.items.filter(item => `${item.name} ${item.sku} ${item.category} ${item.location}`.toLowerCase().includes(search.toLowerCase())).filter(item => !lowOnly || item.qty <= item.min), [store.items, search, lowOnly]);
   const lowStock = store.items.filter(item => item.qty <= item.min);
-  const priceAlerts = store.purchases.filter(purchase => purchase.priceChange >= store.threshold);
+  // Server-derived: filtering the purchase list would now mean "alerts among
+  // the fifty most recent purchases", which is not what the card claims.
+  const priceAlerts = store.priceAlerts;
+  // Both histories are paged by the server, so turning a page is a fetch. In
+  // demo mode everything is already in memory and the index alone moves.
+  const showMovementPage = async (page: number) => {
+    if (!localDemoAuth) {
+      try {
+        const { rows, total } = await apiPage<MovementResponse>('/api/movements', PAGE_SIZE, page * PAGE_SIZE);
+        setStore(value => ({ ...value, movements: rows.map(toMovement), movementTotal: total }));
+      } catch (error) { tell(error instanceof Error ? error.message : 'That page of activity could not be loaded.'); return; }
+    }
+    setMovementPageIndex(page);
+  };
+  const showPurchasePage = async (page: number) => {
+    if (!localDemoAuth) {
+      try {
+        const { rows, total } = await apiPage<PurchaseResponse>('/api/purchases', PAGE_SIZE, page * PAGE_SIZE);
+        setStore(value => ({ ...value, purchases: rows.map(toPurchase), purchaseTotal: total }));
+      } catch (error) { tell(error instanceof Error ? error.message : 'That page of purchases could not be loaded.'); return; }
+    }
+    setPurchasePageIndex(page);
+  };
+  // Demo mode holds the whole history, so it windows it here; real mode was
+  // sent exactly one page and shows it as it is.
+  const movementWindow = pageWindow(localDemoAuth ? visibleMoves.length : store.movementTotal, movementPageIndex, page => void showMovementPage(page));
+  const movementRows = localDemoAuth ? visibleMoves.slice(movementWindow.page * PAGE_SIZE, movementWindow.page * PAGE_SIZE + PAGE_SIZE) : visibleMoves;
+  const purchaseWindow = pageWindow(localDemoAuth ? store.purchases.length : store.purchaseTotal, purchasePageIndex, page => void showPurchasePage(page));
+  const purchaseRows = localDemoAuth ? store.purchases.slice(purchaseWindow.page * PAGE_SIZE, purchaseWindow.page * PAGE_SIZE + PAGE_SIZE) : store.purchases;
   const navigateInventory = (low = false) => { setLowOnly(low); setView('inventory'); };
   const logout = async () => { if (!localDemoAuth) await cognitoLogout(); setUser(null); setStore(emptyStore()); setView('dashboard'); };
   const login = async (email: string, password: string) => {
@@ -307,7 +398,7 @@ export default function Home() {
         if (!item) throw new Error('Select an inventory item.');
         if (kind === 'outbound' && quantity > item.qty) throw new Error('Insufficient stock for this issue.');
         const movement: Movement = { id: crypto.randomUUID(), kind, itemId, itemName: item.name, itemUnit: item.unit, qty: quantity, actor: user.name, recipient: String(form.get('recipient')).trim(), note: String(form.get('note')).trim(), at: new Date().toISOString() };
-        setStore(value => withDemoForecast({ ...value, items: value.items.map(entry => entry.id === itemId ? { ...entry, qty: entry.qty + (kind === 'inbound' ? quantity : -quantity) } : entry), movements: [movement, ...value.movements], audits: [audit(user, kind === 'inbound' ? 'Received stock' : 'Issued stock', item.name, `${quantity} ${item.unit} ${kind === 'inbound' ? `received from` : `issued to`} ${movement.recipient}`), ...value.audits] }));
+        setStore(value => withDemoDerived({ ...value, items: value.items.map(entry => entry.id === itemId ? { ...entry, qty: entry.qty + (kind === 'inbound' ? quantity : -quantity) } : entry), movements: [movement, ...value.movements], audits: [audit(user, kind === 'inbound' ? 'Received stock' : 'Issued stock', item.name, `${quantity} ${item.unit} ${kind === 'inbound' ? `received from` : `issued to`} ${movement.recipient}`), ...value.audits] }));
         setDialog(null); tell(kind === 'inbound' ? 'Stock receipt recorded.' : 'Stock issue recorded.'); return;
       }
       await api('/api/movements', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')), kind, quantity: Number(form.get('qty')), recipient: String(form.get('recipient')).trim(), note: String(form.get('note')).trim() }) });
@@ -321,7 +412,7 @@ export default function Home() {
       const name = String(form.get('name')).trim();
       if (localDemoAuth && user) {
         const item: Item = { id: crypto.randomUUID(), name, sku: String(form.get('sku')).trim() || `SKU-${Date.now().toString().slice(-5)}`, category: String(form.get('category')).trim() || 'Uncategorized', location: String(form.get('location')).trim() || 'Unassigned', qty: Number(form.get('qty')) || 0, min: Number(form.get('min')) || 0, unit: String(form.get('unit')).trim() || 'pcs' };
-        setStore(value => withDemoForecast({ ...value, items: [item, ...value.items], audits: [audit(user, 'Created inventory item', item.name, `Starting quantity: ${item.qty} ${item.unit}`), ...value.audits] }));
+        setStore(value => withDemoDerived({ ...value, items: [item, ...value.items], audits: [audit(user, 'Created inventory item', item.name, `Starting quantity: ${item.qty} ${item.unit}`), ...value.audits] }));
         setDialog(null); tell(`${name} added.`); return;
       }
       await api('/api/items', { method: 'POST', body: JSON.stringify({ name, sku: String(form.get('sku')).trim() || `SKU-${Date.now().toString().slice(-5)}`, category: String(form.get('category')).trim() || 'Uncategorized', location: String(form.get('location')).trim() || 'Unassigned', quantity_on_hand: Number(form.get('qty')) || 0, minimum_quantity: Number(form.get('min')) || 0, unit: String(form.get('unit')).trim() || 'pcs' }) });
@@ -338,7 +429,7 @@ export default function Home() {
         const item = store.items.find(entry => entry.id === itemId);
         if (!item) throw new Error('Select an inventory item.');
         const purchase: Purchase = { id: crypto.randomUUID(), itemId, itemName: item.name, itemUnit: item.unit, supplierId, qty: quantity, unitCost, currency: 'CAD', invoice: String(form.get('invoice')).trim(), receipt: receipt?.name || 'No attachment', at: new Date().toISOString(), priceChange: previous ? Number((((unitCost - previous.unitCost) / previous.unitCost) * 100).toFixed(1)) : 0 };
-        setStore(value => withDemoForecast({ ...value, items: value.items.map(entry => entry.id === itemId ? { ...entry, qty: entry.qty + quantity } : entry), purchases: [purchase, ...value.purchases], movements: [{ id: crypto.randomUUID(), kind: 'inbound', itemId, itemName: item.name, itemUnit: item.unit, qty: quantity, actor: user.name, recipient: value.suppliers.find(entry => entry.id === supplierId)?.name || 'Supplier', note: purchase.invoice, at: purchase.at }, ...value.movements], audits: [audit(user, 'Received purchase', item.name, `${quantity} ${item.unit} received at ${money(unitCost)} each`), ...value.audits] }));
+        setStore(value => withDemoDerived({ ...value, items: value.items.map(entry => entry.id === itemId ? { ...entry, qty: entry.qty + quantity } : entry), purchases: [purchase, ...value.purchases], movements: [{ id: crypto.randomUUID(), kind: 'inbound', itemId, itemName: item.name, itemUnit: item.unit, qty: quantity, actor: user.name, recipient: value.suppliers.find(entry => entry.id === supplierId)?.name || 'Supplier', note: purchase.invoice, at: purchase.at }, ...value.movements], audits: [audit(user, 'Received purchase', item.name, `${quantity} ${item.unit} received at ${money(unitCost)} each`), ...value.audits] }));
         setDialog(null); tell('Purchase and receipt recorded.'); return;
       }
       await withReceipt(receipt, uploaded => api('/api/purchases', { method: 'POST', body: JSON.stringify({ item_id: String(form.get('item')), supplier_id: String(form.get('supplier')), quantity: Number(form.get('qty')), unit_cost: Number(form.get('unitCost')), currency: 'CAD', invoice_number: String(form.get('invoice')).trim(), receipt_key: uploaded?.key, receipt_version_id: uploaded?.versionId }) }));
@@ -371,7 +462,9 @@ export default function Home() {
   };
   const updatePriceThreshold = async (value: number) => {
     try {
-      if (localDemoAuth && user) { const threshold = Math.max(1, Math.round(value)); setStore(current => ({ ...current, threshold, audits: [audit(user, 'Updated price alert policy', 'Price policy', `Price increase threshold: ${threshold}%`), ...current.audits] })); tell('Price alert policy updated.'); return; }
+      // Through withDemoDerived: the threshold is what decides which purchases
+      // are alerts, and those are no longer filtered at the point of use.
+      if (localDemoAuth && user) { const threshold = Math.max(1, Math.round(value)); setStore(current => withDemoDerived({ ...current, threshold, audits: [audit(user, 'Updated price alert policy', 'Price policy', `Price increase threshold: ${threshold}%`), ...current.audits] })); tell('Price alert policy updated.'); return; }
       await api('/api/price-policy', { method: 'PATCH', body: JSON.stringify({ threshold_percent: Math.max(1, Math.round(value)) }) }); await refresh(); tell('Price alert policy updated.');
     }
     catch (error) { tell(error instanceof Error ? error.message : 'Price policy could not be updated.'); }
@@ -471,10 +564,10 @@ export default function Home() {
     {menu && <button aria-label="Close navigation" onClick={() => setMenu(false)} className="scrim" />}
     <section className="content"><header><div className="title-row"><IconButton label="Open navigation" onClick={() => setMenu(true)}><Menu size={18} /></IconButton><div><h1>{nav.find(entry => entry.view === view)?.label}</h1><p>Warehouse 01</p></div></div><div className="header-actions"><LanguageSelect />{canAudit && <IconButton label={t('exportAudit', 'Export audit log')} onClick={exportAudits}><Download size={17} /></IconButton>}<div className="avatar">{initials(user.name)}</div><div className="account-name"><b>{user.name}</b><small>{t(roleKey[user.role], roleLabel[user.role])}</small></div><IconButton label={t('signOut', 'Sign out')} onClick={logout}><LogOut size={17} /></IconButton></div></header>
       <div className="page"><div className="intro"><div><p>Warehouse 01 · {t(roleKey[user.role], roleLabel[user.role])}</p><h2>{view === 'dashboard' ? t('welcome', 'Welcome back, {name}.', { name: user.name }) : nav.find(entry => entry.view === view)?.label}</h2></div><div className="commands"><button className="secondary" onClick={() => setDialog('issue')}><ArrowUpFromLine size={17} />{t('issueStock', 'Issue stock')}</button>{canReceive && <button className="secondary" onClick={() => setDialog('receive')} title="Stock arriving without a purchase — a return, a transfer in, or a correction"><ArrowDownToLine size={17} />{t('receiveStock', 'Receive stock')}</button>}{canReceive && <button className="primary" onClick={() => openPurchase()}><ArrowDownToLine size={17} />{t('receivePurchase', 'Receive purchase')}</button>}</div></div>
-        {view === 'dashboard' && <Dashboard items={store.items} movements={visibleMoves} lowStock={lowStock} priceAlerts={priceAlerts} replenishment={store.replenishment} goInventory={navigateInventory} goProcurement={() => setView('procurement')} goActivity={() => setView('activity')} />}
+        {view === 'dashboard' && <Dashboard items={store.items} movements={visibleMoves} lowStock={lowStock} priceAlerts={priceAlerts} priceAlertTotal={store.priceAlertTotal} replenishment={store.replenishment} goInventory={navigateInventory} goProcurement={() => setView('procurement')} goActivity={() => setView('activity')} />}
         {view === 'inventory' && <Inventory items={items} search={search} setSearch={setSearch} lowOnly={lowOnly} clearLow={() => setLowOnly(false)} canManage={canManage} add={() => setDialog('item')} />}
-        {view === 'activity' && canSeeActivity && <Activity movements={visibleMoves} />}
-        {view === 'procurement' && canReceive && <Procurement purchases={store.purchases} suppliers={store.suppliers} alerts={priceAlerts} replenishment={store.replenishment} threshold={store.threshold} canManage={canManage} setThreshold={updatePriceThreshold} add={() => openPurchase()} agentInstruction={agentInstruction} setAgentInstruction={setAgentInstruction} agentBusy={agentBusy} agentResult={agentResult} agentError={agentError} runAgent={runAgent} approveProposal={approveProposal} showIngest={!localDemoAuth && canManage} ingestBusy={ingestBusy} ingestResult={ingestResult} runSupplierIngest={runSupplierIngest} />}
+        {view === 'activity' && canSeeActivity && <Activity movements={movementRows} pager={movementWindow} />}
+        {view === 'procurement' && canReceive && <Procurement purchases={purchaseRows} pager={purchaseWindow} suppliers={store.suppliers} alerts={priceAlerts} replenishment={store.replenishment} threshold={store.threshold} canManage={canManage} setThreshold={updatePriceThreshold} add={() => openPurchase()} agentInstruction={agentInstruction} setAgentInstruction={setAgentInstruction} agentBusy={agentBusy} agentResult={agentResult} agentError={agentError} runAgent={runAgent} approveProposal={approveProposal} showIngest={!localDemoAuth && canManage} ingestBusy={ingestBusy} ingestResult={ingestResult} runSupplierIngest={runSupplierIngest} />}
         {view === 'expenses' && <Expenses expenses={visibleExpenses} canApprove={canApprove} canPay={canManage} add={() => setDialog('expense')} update={updateExpense} />}
         {view === 'audit' && canAudit && <AuditLog audits={store.audits} eventFilters={auditEventFilters} setEventFilters={setAuditEventFilters} events={auditEvents} eventsBusy={auditEventsBusy} search={searchAuditEvents} />}
         {view === 'settings' && <AppearanceSettings preference={appearancePreference} companyDefault={store.defaultAppearance} canManage={canManage} updatePreference={updateAppearancePreference} updateCompanyDefault={updateCompanyAppearance} />}
@@ -489,18 +582,18 @@ export default function Home() {
   </main></I18nContext.Provider>;
 }
 
-function Dashboard({ items, movements, lowStock, priceAlerts, replenishment, goInventory, goProcurement, goActivity }: { items: Item[]; movements: Movement[]; lowStock: Item[]; priceAlerts: Purchase[]; replenishment: Replenishment[]; goInventory: (low?: boolean) => void; goProcurement: () => void; goActivity: () => void }) {
+function Dashboard({ items, movements, lowStock, priceAlerts, priceAlertTotal, replenishment, goInventory, goProcurement, goActivity }: { items: Item[]; movements: Movement[]; lowStock: Item[]; priceAlerts: PriceAlert[]; priceAlertTotal: number; replenishment: Replenishment[]; goInventory: (low?: boolean) => void; goProcurement: () => void; goActivity: () => void }) {
   const units = items.reduce((sum, item) => sum + item.qty, 0); const cards = [
-    ['Stocked items', String(items.length), 'Active SKUs', Boxes, 'green', () => goInventory()], ['Units on hand', units.toLocaleString(), 'Across all locations', Package, 'blue', () => goInventory()], ['Needs attention', String(lowStock.length), 'Below minimum level', TriangleAlert, 'orange', () => goInventory(true)], ['Price alerts', String(priceAlerts.length), 'Supplier review needed', TrendingUp, 'violet', goProcurement],
+    ['Stocked items', String(items.length), 'Active SKUs', Boxes, 'green', () => goInventory()], ['Units on hand', units.toLocaleString(), 'Across all locations', Package, 'blue', () => goInventory()], ['Needs attention', String(lowStock.length), 'Below minimum level', TriangleAlert, 'orange', () => goInventory(true)], ['Price alerts', String(priceAlertTotal), 'Supplier review needed', TrendingUp, 'violet', goProcurement],
   ] as const;
   return <><div className="metric-grid">{cards.map(([title, value, detail, Icon, tone, click]) => <button className="metric metric-button" key={title} type="button" onClick={click}><div><p>{title}</p><strong>{value}</strong><small>{detail}</small></div><span className={`metric-icon ${tone}`}><Icon size={18} /></span></button>)}</div><div className="dashboard-grid"><section className="panel"><PanelHeading title="Recent activity" note="Latest warehouse movements" action="View activity" onClick={goActivity} />{movements.slice(0, 5).map(move => <MovementRow key={move.id} movement={move} />)}{!movements.length && <Empty label="No movements in your visible scope." />}</section><section className="panel"><PanelHeading title="Attention queue" note="Stock and price issues requiring review" />{lowStock.slice(0, 2).map(item => <div className="low-row" key={item.id}><div><b>{item.name}</b><small>Low stock · minimum {item.min} {item.unit}</small></div><em>{item.qty} {item.unit}</em></div>)}{priceAlerts.slice(0, 2).map(purchase => <div className="low-row" key={purchase.id}><div><b>{purchase.itemName}</b><small>Purchase price increased {purchase.priceChange}%</small></div><em>{money(purchase.unitCost)}</em></div>)}{!lowStock.length && !priceAlerts.length && <Empty label="Everything is within its configured limits." />}</section></div>{replenishment.length > 0 && <section className="panel forecast-panel"><PanelHeading title="Replenishment forecast" note="Based on outbound demand, current stock, supplier price, and lead time" action="Review purchase options" onClick={goProcurement} />{replenishment.slice(0, 3).map(recommendation => <div className="forecast-row" key={recommendation.itemId}><div><b>{recommendation.itemName}</b><small>{recommendation.daysOfCover === null ? 'Low stock with no recent outbound history' : `${recommendation.daysOfCover} days of cover at ${recommendation.dailyUsage} ${recommendation.unit}/day`}</small></div><div><strong>Order {recommendation.suggestedQuantity} {recommendation.unit}</strong><small>{recommendation.recommendedSupplier ? `${recommendation.recommendedSupplier.supplierName} · ${money(recommendation.recommendedSupplier.unitCost, recommendation.recommendedSupplier.currency)} · ${recommendation.recommendedSupplier.leadDays} days` : 'Add supplier price history to compare options'}</small></div></div>)}</section>}</>;
 }
 
 function Inventory({ items, search, setSearch, lowOnly, clearLow, canManage, add }: { items: Item[]; search: string; setSearch: (value: string) => void; lowOnly: boolean; clearLow: () => void; canManage: boolean; add: () => void }) { const { visible, ...pager } = usePaged(items); return <section className="panel"><div className="table-tools"><label><Search size={17} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search item, SKU, category, or location" /></label><div className="table-actions">{lowOnly && <button className="filter-pill" onClick={clearLow}>Low stock only <X size={14} /></button>}{canManage && <button className="primary" onClick={add}><Plus size={17} />New item</button>}</div></div><div className="table-wrap"><table><thead><tr><th>Item</th><th>Location</th><th>On hand</th><th>Minimum</th><th>Status</th></tr></thead><tbody>{visible.map(item => <tr key={item.id}><td><b>{item.name}</b><small className="mono">{item.sku} · {item.category}</small></td><td>{slot(item.location) ? <><b>{slotLabel(item.location)}</b><small className="mono">{item.location.trim().toUpperCase()}</small></> : item.location}</td><td><b>{item.qty}</b> <span>{item.unit}</span></td><td>{item.min} {item.unit}</td><td><Status tone={item.qty <= item.min ? 'warn' : 'good'}>{item.qty <= item.min ? 'Low stock' : 'Healthy'}</Status></td></tr>)}{!items.length && <tr><td colSpan={5}><Empty label="No inventory matches this filter." /></td></tr>}</tbody></table></div><Pager {...pager} label="items" /></section>; }
 
-function Activity({ movements }: { movements: Movement[] }) { const { visible, ...pager } = usePaged(movements); return <section className="panel"><PanelHeading title="Warehouse activity" note="Receipts and issues in your visible scope" /><div className="table-wrap"><table><thead><tr><th>Time</th><th>Movement</th><th>Item</th><th>Quantity</th><th>Handled by</th><th>Recipient / supplier</th></tr></thead><tbody>{visible.map(move => <tr key={move.id}><td>{date(move.at)}</td><td><Status tone={move.kind === 'inbound' ? 'good' : 'warn'}>{move.kind === 'inbound' ? 'Receipt' : 'Issue'}</Status></td><td><b>{move.itemName}</b><small>{move.note}</small></td><td><b className={move.kind === 'inbound' ? 'amount-in' : 'amount-out'}>{move.kind === 'inbound' ? '+' : '-'}{move.qty} {move.itemUnit}</b></td><td>{move.actor}</td><td>{move.recipient}</td></tr>)}{!movements.length && <tr><td colSpan={6}><Empty label="No activity in your visible scope." /></td></tr>}</tbody></table></div><Pager {...pager} label="movements" /></section>; }
+function Activity({ movements, pager }: { movements: Movement[]; pager: PageWindow }) { return <section className="panel"><PanelHeading title="Warehouse activity" note="Receipts and issues in your visible scope" /><div className="table-wrap"><table><thead><tr><th>Time</th><th>Movement</th><th>Item</th><th>Quantity</th><th>Handled by</th><th>Recipient / supplier</th></tr></thead><tbody>{movements.map(move => <tr key={move.id}><td>{date(move.at)}</td><td><Status tone={move.kind === 'inbound' ? 'good' : 'warn'}>{move.kind === 'inbound' ? 'Receipt' : 'Issue'}</Status></td><td><b>{move.itemName}</b><small>{move.note}</small></td><td><b className={move.kind === 'inbound' ? 'amount-in' : 'amount-out'}>{move.kind === 'inbound' ? '+' : '-'}{move.qty} {move.itemUnit}</b></td><td>{move.actor}</td><td>{move.recipient}</td></tr>)}{!movements.length && <tr><td colSpan={6}><Empty label="No activity in your visible scope." /></td></tr>}</tbody></table></div><Pager {...pager} label="movements" /></section>; }
 
-function Procurement({ purchases, suppliers, alerts, replenishment, threshold, canManage, setThreshold, add, agentInstruction, setAgentInstruction, agentBusy, agentResult, agentError, runAgent, approveProposal, showIngest, ingestBusy, ingestResult, runSupplierIngest }: { purchases: Purchase[]; suppliers: Supplier[]; alerts: Purchase[]; replenishment: Replenishment[]; threshold: number; canManage: boolean; setThreshold: (value: number) => void; add: () => void; agentInstruction: string; setAgentInstruction: (value: string) => void; agentBusy: boolean; agentResult: AgentRunResponse | null; agentError: string; runAgent: () => void; approveProposal: (proposal: AgentProposal) => void; showIngest: boolean; ingestBusy: boolean; ingestResult: SupplierPriceIngestResponse | null; runSupplierIngest: () => void }) { const { visible: purchasePage, ...purchasePager } = usePaged(purchases); return <><div className="procurement-top"><section className="panel price-policy"><div><p className="eyebrow">Price monitoring</p><h3>Alert when a purchase price rises by</h3><p className="small-copy">Compare the newest price with the prior purchase of the same item.</p></div>{canManage ? <label className="threshold"><input type="number" min="1" defaultValue={threshold} key={threshold} onBlur={event => setThreshold(Number(event.currentTarget.value) || 1)} />%</label> : <strong>{threshold}%</strong>}</section><section className="panel supplier-summary"><PanelHeading title="Supplier coverage" note="Preferred and backup options" />{suppliers.map(supplier => <div key={supplier.id} className="supplier-row"><div><b>{supplier.name}</b><small>{supplier.leadDays}-day lead time · {supplier.rating}/5 rating</small></div><Status tone={supplier.status === 'preferred' ? 'good' : supplier.status === 'paused' ? 'danger' : 'neutral'}>{supplier.status}</Status></div>)}</section></div>{showIngest && <section className="panel ingest-panel"><div className="panel-heading"><div><h3>Supplier price submissions</h3><p>Drain the webhook inbox suppliers push signed price quotes into via API Gateway.</p></div><button onClick={runSupplierIngest} disabled={ingestBusy}>{ingestBusy ? 'Checking…' : 'Check now'}</button></div>{ingestResult && <div className="ingest-summary"><p>{ingestResult.processed} submission{ingestResult.processed === 1 ? '' : 's'} processed.</p><div className="ingest-chips">{ingestResult.results.map((result, index) => <span key={index} className={`ingest-chip ${result.status}`}>{result.sku || 'unknown'}: {result.status.replaceAll('_', ' ')}{result.price_change_percent !== undefined ? ` (${result.price_change_percent > 0 ? '+' : ''}${result.price_change_percent}%)` : ''}</span>)}{!ingestResult.results.length && <span className="ingest-chip recorded">Inbox is empty</span>}</div></div>}</section>}<section className="panel agent-panel"><PanelHeading title="Procurement agent" note="Ask what to reorder. It can only propose a purchase, never place one." />{agentError && <p className="agent-error">{agentError}</p>}<div className="agent-ask"><input value={agentInstruction} onChange={event => setAgentInstruction(event.target.value)} placeholder="What should we reorder this week?" disabled={agentBusy} /><button className="primary" onClick={runAgent} disabled={agentBusy}><Bot size={16} />{agentBusy ? 'Thinking…' : 'Ask the agent'}</button></div>{agentResult && <div className="agent-result"><p className="agent-summary">{agentResult.summary}</p>{agentResult.steps.length > 0 && <div className="agent-steps">{agentResult.steps.map((step, index) => <span key={index} className={`agent-step ${step.ok ? 'ok' : 'failed'}`}>{step.tool}</span>)}</div>}{agentResult.proposals.map(proposal => <div className="proposal-row" key={`${proposal.sku}-${proposal.supplier_id}`}><div><b>{proposal.item_name}</b><small>{proposal.reason}</small></div><div><strong>Order {proposal.quantity} {proposal.unit}</strong><small>{proposal.supplier_name}{proposal.differs_from_engine ? ` · engine suggested ${proposal.engine_suggested_quantity}` : ''}</small></div><button className="secondary" onClick={() => approveProposal(proposal)}>Review &amp; approve</button></div>)}{!agentResult.proposals.length && <Empty label="Nothing needs ordering right now." />}</div>}</section>{replenishment.length > 0 && <section className="panel recommendation-panel"><PanelHeading title="Recommended purchase plan" note="Ranked by latest price, lead time, supplier rating, and preferred status" />{replenishment.map(recommendation => <div className="recommendation-row" key={recommendation.itemId}><div><b>{recommendation.itemName}</b><small>{recommendation.quantityOnHand} {recommendation.unit} on hand · {recommendation.daysOfCover === null ? 'low stock' : `${recommendation.daysOfCover} days of cover`}</small></div><div><strong>Order {recommendation.suggestedQuantity} {recommendation.unit}</strong><small>{recommendation.recommendedSupplier ? `Recommended: ${recommendation.recommendedSupplier.supplierName} · ${money(recommendation.recommendedSupplier.unitCost, recommendation.recommendedSupplier.currency)} · ${recommendation.recommendedSupplier.leadDays}-day lead time` : 'No supplier price history yet'}</small></div></div>)}</section>}<section className="panel"><div className="table-tools"><div><b>Purchases and price history</b><small className="block-note">Each receipt updates price history and may produce an alert.</small></div><button className="primary" onClick={add}><Plus size={17} />Receive purchase</button></div><div className="table-wrap"><table><thead><tr><th>Purchase date</th><th>Item / supplier</th><th>Quantity</th><th>Unit cost</th><th>Change</th><th>Attachment</th></tr></thead><tbody>{purchasePage.map(purchase => { const supplier = suppliers.find(entry => entry.id === purchase.supplierId); return <tr key={purchase.id}><td>{date(purchase.at)}</td><td><b>{purchase.itemName}</b><small>{supplier?.name} · {purchase.invoice}</small></td><td>{purchase.qty} {purchase.itemUnit}</td><td><b>{money(purchase.unitCost, purchase.currency)}</b></td><td><span className={purchase.priceChange >= threshold ? 'price-up' : purchase.priceChange < 0 ? 'price-down' : 'price-flat'}>{purchase.priceChange > 0 ? <TrendingUp size={14} /> : purchase.priceChange < 0 ? <TrendingDown size={14} /> : null}{purchase.priceChange === 0 ? 'First price' : `${purchase.priceChange > 0 ? '+' : ''}${purchase.priceChange}%`}</span></td><td><ReceiptAttachment name={purchase.receipt} url={purchase.receiptUrl} /></td></tr>; })}</tbody></table></div><Pager {...purchasePager} label="purchases" /></section>{alerts.length > 0 && <section className="panel alert-panel"><PanelHeading title="Supplier review recommended" note="These purchases exceeded the configured price-increase threshold." />{alerts.map(alert => { const alternatives = purchases.filter(entry => entry.itemId === alert.itemId && entry.supplierId !== alert.supplierId).slice(0, 2); return <div key={alert.id} className="alert-row"><TriangleAlert size={19} /><div><b>{alert.itemName} increased {alert.priceChange}%</b><small>Current purchase: {money(alert.unitCost)}. Alternative recent prices: {alternatives.map(entry => money(entry.unitCost)).join(', ') || 'No alternate supplier data yet'}.</small></div></div>; })}</section>}</>;
+function Procurement({ purchases, pager, suppliers, alerts, replenishment, threshold, canManage, setThreshold, add, agentInstruction, setAgentInstruction, agentBusy, agentResult, agentError, runAgent, approveProposal, showIngest, ingestBusy, ingestResult, runSupplierIngest }: { purchases: Purchase[]; pager: PageWindow; suppliers: Supplier[]; alerts: PriceAlert[]; replenishment: Replenishment[]; threshold: number; canManage: boolean; setThreshold: (value: number) => void; add: () => void; agentInstruction: string; setAgentInstruction: (value: string) => void; agentBusy: boolean; agentResult: AgentRunResponse | null; agentError: string; runAgent: () => void; approveProposal: (proposal: AgentProposal) => void; showIngest: boolean; ingestBusy: boolean; ingestResult: SupplierPriceIngestResponse | null; runSupplierIngest: () => void }) { return <><div className="procurement-top"><section className="panel price-policy"><div><p className="eyebrow">Price monitoring</p><h3>Alert when a purchase price rises by</h3><p className="small-copy">Compare the newest price with the prior purchase of the same item.</p></div>{canManage ? <label className="threshold"><input type="number" min="1" defaultValue={threshold} key={threshold} onBlur={event => setThreshold(Number(event.currentTarget.value) || 1)} />%</label> : <strong>{threshold}%</strong>}</section><section className="panel supplier-summary"><PanelHeading title="Supplier coverage" note="Preferred and backup options" />{suppliers.map(supplier => <div key={supplier.id} className="supplier-row"><div><b>{supplier.name}</b><small>{supplier.leadDays}-day lead time · {supplier.rating}/5 rating</small></div><Status tone={supplier.status === 'preferred' ? 'good' : supplier.status === 'paused' ? 'danger' : 'neutral'}>{supplier.status}</Status></div>)}</section></div>{showIngest && <section className="panel ingest-panel"><div className="panel-heading"><div><h3>Supplier price submissions</h3><p>Drain the webhook inbox suppliers push signed price quotes into via API Gateway.</p></div><button onClick={runSupplierIngest} disabled={ingestBusy}>{ingestBusy ? 'Checking…' : 'Check now'}</button></div>{ingestResult && <div className="ingest-summary"><p>{ingestResult.processed} submission{ingestResult.processed === 1 ? '' : 's'} processed.</p><div className="ingest-chips">{ingestResult.results.map((result, index) => <span key={index} className={`ingest-chip ${result.status}`}>{result.sku || 'unknown'}: {result.status.replaceAll('_', ' ')}{result.price_change_percent !== undefined ? ` (${result.price_change_percent > 0 ? '+' : ''}${result.price_change_percent}%)` : ''}</span>)}{!ingestResult.results.length && <span className="ingest-chip recorded">Inbox is empty</span>}</div></div>}</section>}<section className="panel agent-panel"><PanelHeading title="Procurement agent" note="Ask what to reorder. It can only propose a purchase, never place one." />{agentError && <p className="agent-error">{agentError}</p>}<div className="agent-ask"><input value={agentInstruction} onChange={event => setAgentInstruction(event.target.value)} placeholder="What should we reorder this week?" disabled={agentBusy} /><button className="primary" onClick={runAgent} disabled={agentBusy}><Bot size={16} />{agentBusy ? 'Thinking…' : 'Ask the agent'}</button></div>{agentResult && <div className="agent-result"><p className="agent-summary">{agentResult.summary}</p>{agentResult.steps.length > 0 && <div className="agent-steps">{agentResult.steps.map((step, index) => <span key={index} className={`agent-step ${step.ok ? 'ok' : 'failed'}`}>{step.tool}</span>)}</div>}{agentResult.proposals.map(proposal => <div className="proposal-row" key={`${proposal.sku}-${proposal.supplier_id}`}><div><b>{proposal.item_name}</b><small>{proposal.reason}</small></div><div><strong>Order {proposal.quantity} {proposal.unit}</strong><small>{proposal.supplier_name}{proposal.differs_from_engine ? ` · engine suggested ${proposal.engine_suggested_quantity}` : ''}</small></div><button className="secondary" onClick={() => approveProposal(proposal)}>Review &amp; approve</button></div>)}{!agentResult.proposals.length && <Empty label="Nothing needs ordering right now." />}</div>}</section>{replenishment.length > 0 && <section className="panel recommendation-panel"><PanelHeading title="Recommended purchase plan" note="Ranked by latest price, lead time, supplier rating, and preferred status" />{replenishment.map(recommendation => <div className="recommendation-row" key={recommendation.itemId}><div><b>{recommendation.itemName}</b><small>{recommendation.quantityOnHand} {recommendation.unit} on hand · {recommendation.daysOfCover === null ? 'low stock' : `${recommendation.daysOfCover} days of cover`}</small></div><div><strong>Order {recommendation.suggestedQuantity} {recommendation.unit}</strong><small>{recommendation.recommendedSupplier ? `Recommended: ${recommendation.recommendedSupplier.supplierName} · ${money(recommendation.recommendedSupplier.unitCost, recommendation.recommendedSupplier.currency)} · ${recommendation.recommendedSupplier.leadDays}-day lead time` : 'No supplier price history yet'}</small></div></div>)}</section>}<section className="panel"><div className="table-tools"><div><b>Purchases and price history</b><small className="block-note">Each receipt updates price history and may produce an alert.</small></div><button className="primary" onClick={add}><Plus size={17} />Receive purchase</button></div><div className="table-wrap"><table><thead><tr><th>Purchase date</th><th>Item / supplier</th><th>Quantity</th><th>Unit cost</th><th>Change</th><th>Attachment</th></tr></thead><tbody>{purchases.map(purchase => { const supplier = suppliers.find(entry => entry.id === purchase.supplierId); return <tr key={purchase.id}><td>{date(purchase.at)}</td><td><b>{purchase.itemName}</b><small>{supplier?.name} · {purchase.invoice}</small></td><td>{purchase.qty} {purchase.itemUnit}</td><td><b>{money(purchase.unitCost, purchase.currency)}</b></td><td><span className={purchase.priceChange >= threshold ? 'price-up' : purchase.priceChange < 0 ? 'price-down' : 'price-flat'}>{purchase.priceChange > 0 ? <TrendingUp size={14} /> : purchase.priceChange < 0 ? <TrendingDown size={14} /> : null}{purchase.priceChange === 0 ? 'First price' : `${purchase.priceChange > 0 ? '+' : ''}${purchase.priceChange}%`}</span></td><td><ReceiptAttachment name={purchase.receipt} url={purchase.receiptUrl} /></td></tr>; })}</tbody></table></div><Pager {...pager} label="purchases" /></section>{alerts.length > 0 && <section className="panel alert-panel"><PanelHeading title="Supplier review recommended" note="These purchases exceeded the configured price-increase threshold." />{alerts.map(alert => <div key={alert.id} className="alert-row"><TriangleAlert size={19} /><div><b>{alert.itemName} increased {alert.priceChange}%</b><small>{alert.supplierName} charged {money(alert.unitCost, alert.currency)}. Alternative recent prices: {alert.alternatives.map(option => `${option.supplierName} ${money(option.unitCost, option.currency)}`).join(', ') || 'No alternate supplier data yet'}.</small></div></div>)}</section>}</>;
 }
 
 function Expenses({ expenses, canApprove, canPay, add, update }: { expenses: Expense[]; canApprove: boolean; canPay: boolean; add: () => void; update: (expense: Expense, status: ExpenseStatus) => void }) { return <section className="panel"><div className="table-tools"><div><b>Reimbursements</b><small className="block-note">Receipts, approval history, and payment state.</small></div><button className="primary" onClick={add}><Plus size={17} />Submit expense</button></div><div className="table-wrap"><table><thead><tr><th>Submitted</th><th>Employee / item</th><th>Supplier / purpose</th><th>Receipt</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{expenses.map(expense => <tr key={expense.id}><td>{date(expense.at)}</td><td><b>{expense.submitter}</b><small>{expense.itemName} · {expense.qty} {expense.itemUnit}</small></td><td><b>{expense.supplier}</b><small>{expense.purpose}</small></td><td><ReceiptAttachment name={expense.receipt} url={expense.receiptUrl} /></td><td><b>{money(expense.amount, expense.currency)}</b></td><td><Status tone={expense.status === 'paid' || expense.status === 'approved' ? 'good' : expense.status === 'rejected' ? 'danger' : 'warn'}>{expense.status}</Status>{expense.reviewer && <small>{expense.reviewer}</small>}</td><td><div className="row-actions">{expense.status === 'submitted' && canApprove && <><IconButton label="Approve reimbursement" onClick={() => update(expense, 'approved')}><Check size={16} /></IconButton><IconButton label="Reject reimbursement" onClick={() => update(expense, 'rejected')}><XCircle size={16} /></IconButton></>}{expense.status === 'approved' && canPay && <button className="pay-button" onClick={() => update(expense, 'paid')}>Mark paid</button>}</div></td></tr>)}{!expenses.length && <tr><td colSpan={7}><Empty label="No reimbursement submissions in your visible scope." /></td></tr>}</tbody></table></div></section>; }
@@ -535,7 +628,6 @@ function MovementRow({ movement }: { movement: Movement }) { const inbound = mov
 function Status({ tone, children }: { tone: 'good' | 'warn' | 'danger' | 'neutral'; children: ReactNode }) { return <i className={`status ${tone}`}>{children}</i>; }
 function Empty({ label }: { label: string }) { return <div className="empty">{label}</div>; }
 
-const PAGE_SIZE = 50;
 const PICKER_RESULTS = 8;
 
 type PageWindow = { from: number; to: number; total: number; page: number; pages: number; setPage: (value: number) => void };
@@ -546,15 +638,27 @@ type PageWindow = { from: number; to: number; total: number; page: number; pages
  * its inventory, for rows nobody scrolls to: the browser lays out every one of
  * them before the first is readable.
  */
-function usePaged<T>(rows: T[]): PageWindow & { visible: T[] } {
-  const [page, setPage] = useState(0);
-  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+/**
+ * Where a reader is in a list of `total` rows. The list itself may be in hand
+ * (the catalogue) or one page of it fetched from the server (movement and
+ * purchase history) -- the pager reads the same either way, because what it
+ * says has to be true of the whole list and not of the page.
+ */
+function pageWindow(total: number, page: number, setPage: (value: number) => void): PageWindow {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // Searching while deep in the table would otherwise leave the reader past
   // the end of what is left. Clamping rather than resetting means clearing the
   // search puts them back where they were.
   const current = Math.min(page, pages - 1);
   const start = current * PAGE_SIZE;
-  return { visible: rows.slice(start, start + PAGE_SIZE), from: start + 1, to: Math.min(rows.length, start + PAGE_SIZE), total: rows.length, page: current, pages, setPage };
+  return { from: start + 1, to: Math.min(total, start + PAGE_SIZE), total, page: current, pages, setPage };
+}
+
+function usePaged<T>(rows: T[]): PageWindow & { visible: T[] } {
+  const [page, setPage] = useState(0);
+  const window = pageWindow(rows.length, page, setPage);
+  const start = window.page * PAGE_SIZE;
+  return { ...window, visible: rows.slice(start, start + PAGE_SIZE) };
 }
 
 function Pager({ from, to, total, page, pages, setPage, label }: PageWindow & { label: string }) {

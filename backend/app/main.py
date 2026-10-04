@@ -12,7 +12,7 @@ from .auth import get_current_user, require_roles
 from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
-from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, MeResponse, MovementCreate, MovementResponse, PriceAlertResponse, PriceAlternative, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
 from .agent import build_client, run_agent
 from .audit_events import get_event_store, query as query_events
 from .cache import get_cache
@@ -184,18 +184,35 @@ def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User =
 
 
 @app.get("/api/movements", response_model=list[MovementResponse])
-def list_movements(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def list_movements(
+    response: Response,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Movements per page, newest first."),
+    offset: int = Query(0, ge=0),
+):
+    """One page of the movement history, newest first, with its full length in
+    `X-Total-Count`. Unpaged it answers with every movement ever recorded --
+    16 MB at a 50,000-row history, which is what signing in used to cost."""
     actor = aliased(User)
+    # The same restriction has to bound the count as well as the page, or an
+    # employee is told there are more of their movements than they can reach.
+    scope = (StockMovement.actor_id == user.id,) if user.role is Role.employee else ()
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(StockMovement).where(*scope)))
     query = (
         select(StockMovement, actor.name, Item.name, Item.unit)
         .join(actor, StockMovement.actor_id == actor.id)
         # Inner join: the FK is ON DELETE RESTRICT, so a movement cannot
         # outlive the item it moved.
         .join(Item, StockMovement.item_id == Item.id)
-        .order_by(StockMovement.created_at.desc())
+        .where(*scope)
+        # The id breaks ties on the timestamp. Without it the order is partial,
+        # and two pages of a partial order can repeat a row and lose another.
+        .order_by(StockMovement.created_at.desc(), StockMovement.id)
+        .offset(offset)
     )
-    if user.role is Role.employee:
-        query = query.where(StockMovement.actor_id == user.id)
+    if limit is not None:
+        query = query.limit(limit)
     return [movement_response(movement, actor_name, item_name, item_unit) for movement, actor_name, item_name, item_unit in db.execute(query).all()]
 
 
@@ -225,9 +242,93 @@ def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), user
 
 
 @app.get("/api/purchases", response_model=list[PurchaseResponse])
-def list_purchases(_: User = Depends(require_roles(Role.admin, Role.supervisor)), db: Session = Depends(get_db)):
-    query = select(Purchase, Item.name, Item.unit).join(Item, Purchase.item_id == Item.id).order_by(Purchase.created_at.desc())
+def list_purchases(
+    response: Response,
+    _: User = Depends(require_roles(Role.admin, Role.supervisor)),
+    db: Session = Depends(get_db),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE, description="Purchases per page, newest first."),
+    offset: int = Query(0, ge=0),
+):
+    """One page of purchase history, newest first, with its full length in
+    `X-Total-Count`. See `/api/price-alerts` for the part of this the console
+    used to work out by scanning the whole list."""
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(Purchase)))
+    query = (
+        select(Purchase, Item.name, Item.unit)
+        .join(Item, Purchase.item_id == Item.id)
+        .order_by(Purchase.created_at.desc(), Purchase.id)
+        .offset(offset)
+    )
+    if limit is not None:
+        query = query.limit(limit)
     return [purchase_response(purchase, item_name, item_unit) for purchase, item_name, item_unit in db.execute(query).all()]
+
+
+@app.get("/api/price-alerts", response_model=list[PriceAlertResponse])
+def list_price_alerts(
+    response: Response,
+    _: User = Depends(require_roles(Role.admin, Role.supervisor)),
+    db: Session = Depends(get_db),
+    limit: int = Query(50, ge=1, le=MAX_PAGE),
+    offset: int = Query(0, ge=0),
+):
+    """Purchases whose price rose past the configured threshold, newest first.
+
+    This exists because paging the purchase list took the answer away from the
+    console: it derived the alerts, and the alternative prices beside each one,
+    by filtering every purchase it had been sent. Deriving them from a page
+    would have quietly meant "alerts among the fifty most recent purchases".
+    """
+    breached = Purchase.price_change_percent >= get_price_threshold(db)
+    response.headers["X-Total-Count"] = str(db.scalar(select(func.count()).select_from(Purchase).where(breached)))
+    rows = db.execute(
+        select(Purchase, Item.name, Item.unit, Supplier.name)
+        .join(Item, Purchase.item_id == Item.id)
+        .join(Supplier, Purchase.supplier_id == Supplier.id)
+        .where(breached)
+        .order_by(Purchase.created_at.desc(), Purchase.id)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    alternatives = _alternative_prices(db, [purchase for purchase, _name, _unit, _supplier in rows])
+    return [
+        PriceAlertResponse(
+            **purchase_response(purchase, item_name, item_unit).model_dump(),
+            supplier_name=supplier_name,
+            alternatives=[option for option in alternatives.get(purchase.item_id, []) if option.supplier_id != purchase.supplier_id][:2],
+        )
+        for purchase, item_name, item_unit, supplier_name in rows
+    ]
+
+
+def _alternative_prices(db: Session, alerts: list[Purchase]) -> dict[uuid.UUID, list[PriceAlternative]]:
+    """The price each other supplier last charged for the items being alerted on.
+
+    One query for the whole page rather than one per alert: ROW_NUMBER picks the
+    newest purchase per item/supplier pair, the same way the replenishment
+    engine picks the price still in force.
+    """
+    item_ids = {alert.item_id for alert in alerts}
+    if not item_ids:
+        return {}
+    recency = func.row_number().over(
+        partition_by=(Purchase.item_id, Purchase.supplier_id),
+        order_by=(Purchase.created_at.desc(), Purchase.id),
+    ).label("recency")
+    latest = (
+        select(Purchase.item_id.label("item_id"), Purchase.supplier_id.label("supplier_id"), Purchase.unit_cost.label("unit_cost"), Purchase.currency.label("currency"), Purchase.created_at.label("created_at"), recency)
+        .where(Purchase.item_id.in_(item_ids))
+        .subquery()
+    )
+    by_item: dict[uuid.UUID, list[PriceAlternative]] = {}
+    for row in db.execute(
+        select(latest.c.item_id, latest.c.supplier_id, Supplier.name, latest.c.unit_cost, latest.c.currency)
+        .join(Supplier, Supplier.id == latest.c.supplier_id)
+        .where(latest.c.recency == 1)
+        .order_by(latest.c.created_at.desc())
+    ):
+        by_item.setdefault(row.item_id, []).append(PriceAlternative(supplier_id=row.supplier_id, supplier_name=row.name, unit_cost=float(row.unit_cost), currency=row.currency))
+    return by_item
 
 
 @app.post("/api/purchases", response_model=PurchaseResponse, status_code=status.HTTP_201_CREATED)

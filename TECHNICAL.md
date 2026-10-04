@@ -160,8 +160,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-305 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 23 browser tests driving the real console in Chromium.
+319 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 27 browser tests driving the real console in Chromium.
 
 ```
 Name                                         Stmts   Miss  Cover
@@ -169,20 +169,20 @@ Name                                         Stmts   Miss  Cover
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
 app/models.py                                  109      0   100%
-app/schemas.py                                 170      0   100%
+app/schemas.py                                 178      0   100%
 app/config.py                                   27      0   100%
 app/services.py                                243      1    99%
 lambdas/receipt_validator/handler.py            59      1    98%
 app/agent/llm.py                                97      5    95%
 app/cache.py                                   141      7    95%
 lambdas/supplier_price_webhook/handler.py       80      4    95%
+app/main.py                                    222     15    93%
 app/agent/tools.py                              72      5    93%
-app/main.py                                    200     15    92%
 app/audit_events.py                            117     13    89%
 app/auth.py                                     75     16    79%
 app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1461     71    95%
+TOTAL                                         1491     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -298,20 +298,51 @@ why there is a test that counts them:
 The 1,800 of 2,000 is the point of the nullable column: a reimbursement need
 not be for a catalogued item, so that one alone is an outer join.
 
-What is still unbounded, and what the table above makes obvious: the 2.55 MB
-catalogue the console no longer needs is the smallest number on it.
-`/api/movements` and `/api/purchases` answer with the whole history, 16 MB and
-12 MB here, and they are now the dominant cost of signing in. They take the
-same `limit`/`offset` treatment next — the rows being self-describing is what
-makes it possible, and the tables already render a page at a time — but paging
-purchases also decides what the price-alert panel means, since it derives the
-alerts and each item's alternative prices from every purchase it has. That is
-a product question, not a query one.
+### History is read a page at a time
 
-Two things still read the whole catalogue: the dashboard's totals (SKU count,
+The table above made the next step obvious: the 2.55 MB catalogue the console
+no longer needs was the smallest number on it. `/api/movements` and
+`/api/purchases` both take `limit`/`offset` now, newest first, with the length
+of the whole history in `X-Total-Count` — and the rows being self-describing is
+what made that possible, since a page of movements can no longer be matched to
+a catalogue the console does not hold.
+
+Both order by `created_at DESC, id`. The timestamp alone is a partial order,
+and that is not a theoretical problem: a batch of issues recorded in one shift
+shares a timestamp to the second, and two pages cut from a partial order can
+repeat one row and never show another. The test writes 25 movements with an
+identical `created_at` and walks them in pages of ten, which fails without the
+tiebreak.
+
+| endpoint | rows | body | queries |
+|---|---|---|---|
+| `/api/movements` unpaged | 50,000 | 16.00 MB | 2 |
+| `/api/movements?limit=50` | 50 | 0.02 MB | 2 |
+| `/api/purchases` unpaged | 30,000 | 12.19 MB | 2 |
+| `/api/purchases?limit=50` | 50 | 0.02 MB | 2 |
+| `/api/price-alerts?limit=50` | 50 | 0.03 MB | 4 |
+
+Signing in went from **31.69 MB to 3.56 MB** against the same simulated
+warehouse.
+
+**Paging the purchase list took an answer away from the console**, which is why
+`/api/price-alerts` exists. The alerts, and the two alternative prices quoted
+beside each one, were worked out by filtering every purchase the console had
+been sent. In this dataset that is 10,817 alerts across the database against 19
+visible in the fifty most recent purchases — so deriving them from a page would
+have quietly turned "price alerts" into "price alerts among the last fifty
+purchases", on a number the dashboard prints on a card. The endpoint answers
+with the breaching purchases newest first, each carrying the latest price from
+every *other* supplier of that item, picked by one `ROW_NUMBER` query for the
+whole page rather than one per alert. Its count is taken before the page is
+cut, so the card is right whatever the page holds.
+
+What is still unpaged: `/api/expenses` (0.95 MB here) and the catalogue itself.
+Two things still want the whole catalogue — the dashboard's totals (SKU count,
 units on hand, what is below its minimum), which want a summary endpoint rather
 than a list, and the item picker's search, which wants `/api/items?search=`
-instead of filtering in the browser.
+instead of filtering in the browser. Paging those as well brings the same
+sign-in to 1.03 MB.
 
 ## Run it
 
