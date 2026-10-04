@@ -356,7 +356,7 @@ http://localhost:8000/docs
 | --- | --- | --- | --- |
 | `GET` | `/health` | Public | Health check |
 | `GET` | `/api/me` | Any authenticated user | Current authenticated profile |
-| `GET` | `/api/items` | Any authenticated user | Inventory catalog |
+| `GET` | `/api/items` | Any authenticated user | Inventory catalog; `search`, `limit`, `offset`, full size in `X-Total-Count` |
 | `POST` | `/api/items` | Admin | Create inventory item |
 | `GET` | `/api/movements` | Any authenticated user | Movements; employee scope is limited to their own actions |
 | `POST` | `/api/movements` | Any authenticated user | Record inbound/outbound stock movement; employees cannot receive stock |

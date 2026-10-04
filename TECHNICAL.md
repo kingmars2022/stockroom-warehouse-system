@@ -160,28 +160,29 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-289 tests, 95% statement coverage, with an 80% floor enforced in CI.
+297 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 19 browser tests driving the real console in Chromium.
 
 ```
 Name                                         Stmts   Miss  Cover
 -----------------------------------------------------------------
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
-app/models.py                                   107      0   100%
-app/schemas.py                                  164      0   100%
-app/config.py                                    27      0   100%
-app/services.py                                 257      1    99%
-lambdas/receipt_validator/handler.py             59      1    98%
-app/agent/llm.py                                 97      5    95%
-app/cache.py                                    141      7    95%
-lambdas/supplier_price_webhook/handler.py        80      4    95%
-app/agent/tools.py                               72      5    93%
-app/main.py                                     177     15    92%
-app/audit_events.py                             117     13    89%
-app/auth.py                                      75     16    79%
-app/db.py                                        13      4    69%
+app/models.py                                  109      0   100%
+app/schemas.py                                 164      0   100%
+app/config.py                                   27      0   100%
+app/services.py                                243      1    99%
+lambdas/receipt_validator/handler.py            59      1    98%
+app/agent/llm.py                                97      5    95%
+app/cache.py                                   141      7    95%
+lambdas/supplier_price_webhook/handler.py       80      4    95%
+app/agent/tools.py                              72      5    93%
+app/main.py                                    187     15    92%
+app/audit_events.py                            117     13    89%
+app/auth.py                                     75     16    79%
+app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1444     71    95%
+TOTAL                                         1442     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -189,6 +190,15 @@ for defects an external code review found in the four features above — the
 kind that pass because a test checks that a design works *as imagined* rather
 than what the mechanism actually does. Kept as its own file because that
 pattern is the useful part, not any single fix.
+
+The console has its own suite ([`e2e/`](e2e)), run in Chromium by Playwright
+against the dev server, because `lint` and `build` prove it compiles and say
+nothing about what it renders. They cover what only a browser can answer: the
+storage codes it spells out, the currency it prints, the dark theme's computed
+colours, and that a long table renders a page rather than the warehouse.
+Playwright starts the dev server itself — the console's demo mode is gated on
+`NODE_ENV=development`, so a production build would leave every test at a
+login it cannot complete.
 
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
 means the `SELECT … FOR UPDATE` lock is never really contended there — SQLite
@@ -223,6 +233,51 @@ over real HTTP. 50 users, 30 seconds, one unscaled `uvicorn` process:
 correct under the load.
 
 ![Load test results](docs/screenshots/loadtest-results.png)
+
+## Behaviour at 10,000 items
+
+The load test answers how many people can use the system at once. How large
+the warehouse itself can be is a different question, and the answer was that
+three things scaled with the wrong number. Seeded with 10,000 items, 20
+suppliers, 50,000 movements and 30,000 purchases:
+
+| | before | after |
+|---|---|---|
+| Replenishment guidance | 3.3 s, 161 MB | 0.97 s, 29 MB |
+| Inventory table | 7406 ms, 130,287 DOM nodes | 151 ms, 840 nodes |
+| Typing in the inventory search | 371 ms | 50 ms |
+| Opening the item dialog | 2516 ms | 102 ms |
+| Picking an item in it | 1101 ms | 80 ms |
+
+**The replenishment engine was linear in history, not in the catalogue.** It
+loaded every outbound movement and every purchase ever recorded as ORM
+entities and grouped them in Python, so the cost of answering "what should we
+reorder" grew with how long the warehouse had been running. A profile put four
+fifths of the time inside SQLAlchemy's row hydration — 280,000 UUID
+conversions to produce two numbers per item — and almost none of it in the
+arithmetic. Demand is now one grouped row per item (`SUM` of what left, `MIN`
+of when the first of it did, the 90-day cut applied in SQL) and price history
+one row per item/supplier pair, picked by `ROW_NUMBER` over that pair.
+Nothing is selected as an entity. Both tables are indexed for the reads that
+remain, because fewer rows returned is not fewer rows scanned.
+
+**The inventory table rendered the whole warehouse.** 10,000 rows is 130,287
+nodes the browser lays out before the first one is readable, for a screen that
+shows a few dozen. Long tables now render a 50-row window with a pager, which
+clamps rather than resets when a filter shortens the list.
+
+**The item dialog was a `<select>` with one `<option>` per SKU.** 2.5 seconds
+to open, another 1.1 to register a choice — and scrolling 10,000 names for the
+one on the shelf is worse than either number. It is a search box over the
+catalogue now, showing the eight closest matches and matching the aisle code
+too, so a picker can find a row by what is printed on the rack.
+
+What is still linear: the console loads the whole catalogue on sign-in,
+because a movement, purchase or expense row identifies its item by id alone
+and the console resolves the name itself. `/api/items` takes `search`, `limit`
+and `offset` and reports the full size in `X-Total-Count` for a client that
+pages, but a page cannot become the default until those rows carry `item_name`
+the way they already carry `actor_name`.
 
 ## Run it
 
