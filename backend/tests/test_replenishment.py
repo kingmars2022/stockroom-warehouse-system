@@ -179,3 +179,48 @@ def test_every_recommendation_exposes_the_fields_the_api_promises(db):
 
     for field in ("item_id", "item_name", "sku", "unit", "quantity_on_hand", "daily_usage", "days_of_cover", "suggested_quantity", "recommended_supplier", "alternatives"):
         assert field in entry, f"missing {field}"
+
+
+def test_demand_is_measured_only_from_movements_inside_the_window(db, employee):
+    """The lookback cut is applied in SQL now, and it has to bound the window's
+    start as well as its contents: a single ancient issue sitting outside it
+    must not stretch the period the recent demand is averaged over.
+    """
+    item = Item(sku="MIX-1", name="Mixed history", quantity_on_hand=5, minimum_quantity=10)
+    db.add(item)
+    db.commit()
+    _outbound(db, item, employee, 500, days_ago=200)
+    _outbound(db, item, employee, 10, days_ago=9)
+
+    result = replenishment_recommendations(db)
+
+    # Only the in-window 10 counts, over the 10 days since it was issued. Were
+    # the old movement included in the total it would read 51/day; were it
+    # excluded from the total but still setting the window's start, 0.05/day.
+    assert result[0]["daily_usage"] == 1.0
+
+
+def test_the_engine_reads_history_without_loading_it(db, supervisor, employee):
+    """Both inputs are reduced in the database. The version before this loaded
+    every movement and every purchase as an ORM entity to group them in Python,
+    so the cost of answering grew with how long the warehouse had been running
+    rather than with how much it stocks -- at 10k items over 80k rows of
+    history, twelve seconds and 160MB to produce a few thousand lines.
+
+    An empty identity map is what that looks like from the outside: nothing the
+    engine read was worth keeping as an object.
+    """
+    item = Item(sku="BULK-1", name="Bulk history", quantity_on_hand=1, minimum_quantity=10)
+    supplier = Supplier(name="Bulk Co", lead_days=4, rating=4.0, status=SupplierStatus.backup)
+    db.add_all([item, supplier])
+    db.commit()
+    for day in range(40):
+        _outbound(db, item, employee, 3, days_ago=day)
+    for index in range(20):
+        _purchase(db, item, supplier, supervisor, 10 + index, f"INV-{index}")
+
+    db.expunge_all()
+    result = replenishment_recommendations(db)
+
+    assert result[0]["sku"] == "BULK-1"
+    assert list(db.identity_map) == [], "the engine hydrated rows it only needed to aggregate"

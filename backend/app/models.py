@@ -2,7 +2,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -77,6 +77,15 @@ class Supplier(IdMixin, TimestampMixin, Base):
 class StockMovement(IdMixin, Base):
     __tablename__ = "stock_movements"
 
+    # Replenishment sums 90 days of outbound movement per item, and the
+    # activity feed reads the newest page first. Neither is served by the
+    # single-column indexes below: without the first of these, working out what
+    # to reorder scans every movement ever recorded.
+    __table_args__ = (
+        Index("ix_stock_movements_kind_created_at", "kind", "created_at"),
+        Index("ix_stock_movements_created_at", "created_at"),
+    )
+
     item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("items.id", ondelete="RESTRICT"), index=True)
     kind: Mapped[MovementKind] = mapped_column(Enum(MovementKind, name="movement_kind"), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -89,7 +98,16 @@ class StockMovement(IdMixin, Base):
 class Purchase(IdMixin, Base):
     __tablename__ = "purchases"
 
-    item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("items.id", ondelete="RESTRICT"), index=True)
+    # Both lead with item_id, so neither leaves anything for a plain index on
+    # it to do: the first serves "the latest purchase of this item" (the
+    # price-change check, the agent's price history), the second the window
+    # that picks the price still in force per item and supplier.
+    __table_args__ = (
+        Index("ix_purchases_item_id_created_at", "item_id", "created_at"),
+        Index("ix_purchases_item_id_supplier_id_created_at", "item_id", "supplier_id", "created_at"),
+    )
+
+    item_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("items.id", ondelete="RESTRICT"))
     supplier_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="RESTRICT"), index=True)
     received_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
