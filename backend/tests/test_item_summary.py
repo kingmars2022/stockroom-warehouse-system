@@ -77,3 +77,61 @@ def test_the_catalogue_can_be_narrowed_to_what_needs_attention(api, shelves):
 
     assert sorted(item["sku"] for item in response.json()) == ["LOW-1", "LOW-2", "LOW-3"]
     assert response.headers["X-Total-Count"] == "3"
+
+
+# --------------------------------------------------------------------------
+# The purchase plan
+# --------------------------------------------------------------------------
+
+def _short(db, count: int):
+    from app.models import Item
+    items = [Item(sku=f"PLAN-{index:03d}", name=f"Plan {index:03d}", quantity_on_hand=index, minimum_quantity=100) for index in range(count)]
+    db.add_all(items)
+    db.commit()
+    return items
+
+
+def test_a_page_of_the_purchase_plan_reports_its_whole_length(api, supervisor, db):
+    """At 10,000 items the plan runs to about 1,700 lines and 1.45 MB, which was
+    the largest thing left on the sign-in path once every list was paged."""
+    _short(db, 12)
+
+    response = api.act_as(supervisor).get("/api/replenishment-recommendations", params={"limit": 5})
+
+    assert len(response.json()) == 5
+    assert response.headers["X-Total-Count"] == "12"
+
+
+def test_the_plan_is_paged_without_losing_its_ranking(api, supervisor, db):
+    """It is a ranking, so the pages have to be cut from one ordering -- the
+    most urgent first, and page two continuing where page one stopped."""
+    _short(db, 9)
+
+    whole = [row["sku"] for row in api.act_as(supervisor).get("/api/replenishment-recommendations").json()]
+    paged = []
+    for offset in (0, 3, 6):
+        paged += [row["sku"] for row in api.act_as(supervisor).get("/api/replenishment-recommendations", params={"limit": 3, "offset": offset}).json()]
+
+    assert paged == whole
+
+
+def test_one_items_guidance_can_be_read_without_the_rest(api, supervisor, db):
+    """The purchase dialog shows one item's line, and cannot find it in a page
+    it was not sent."""
+    items = _short(db, 20)
+    wanted = items[7]
+
+    response = api.act_as(supervisor).get("/api/replenishment-recommendations", params={"item_id": str(wanted.id)})
+
+    assert [row["sku"] for row in response.json()] == [wanted.sku]
+    assert response.headers["X-Total-Count"] == "1"
+
+
+def test_an_item_that_needs_nothing_has_no_guidance_to_give(api, supervisor, db):
+    from app.models import Item
+
+    stocked = Item(sku="FINE-1", name="Fine", quantity_on_hand=900, minimum_quantity=10)
+    db.add(stocked)
+    db.commit()
+
+    assert api.act_as(supervisor).get("/api/replenishment-recommendations", params={"item_id": str(stocked.id)}).json() == []

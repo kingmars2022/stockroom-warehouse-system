@@ -160,8 +160,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-330 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 32 browser tests driving the real console in Chromium.
+334 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 33 browser tests driving the real console in Chromium.
 
 ```
 Name                                         Stmts   Miss  Cover
@@ -176,13 +176,13 @@ lambdas/receipt_validator/handler.py            59      1    98%
 app/agent/llm.py                                97      5    95%
 app/cache.py                                   141      7    95%
 lambdas/supplier_price_webhook/handler.py       80      4    95%
-app/main.py                                    234     15    94%
+app/main.py                                    240     15    94%
 app/agent/tools.py                              72      5    93%
 app/audit_events.py                            117     13    89%
 app/auth.py                                     75     16    79%
 app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1508     71    95%
+TOTAL                                         1514     71    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -359,8 +359,16 @@ item is kept by the picker and handed back whole, because nothing upstream has
 a catalogue to look an id up in; the barcode scanner resolves its SKU the same
 way, and so does approving an agent proposal.
 
-With those two done, `/api/expenses` and `/api/audit-logs` took the same
-`limit`/`offset` treatment, and every long table in the console has a pager.
+With those two done, `/api/expenses`, `/api/audit-logs` and the ranked purchase
+plan took the same `limit`/`offset` treatment, and every long table in the
+console has a pager. The plan is the one that is cached whole and windowed
+afterwards, because it is a ranking and a page of it only means anything cut
+from the same ordering. It also needed a second way in: the purchase dialog
+shows one item's guidance, and cannot find that line in a page it was not sent,
+so `?item_id=` returns the one row. Measuring found that comparison needs to be
+made on the text of the id — the cached plan round-trips through JSON and comes
+back with string ids while the engine itself yields `uuid.UUID`.
+
 Signing in against the same simulated warehouse:
 
 | | before | after |
@@ -368,8 +376,9 @@ Signing in against the same simulated warehouse:
 | `/api/items` | 10,000 rows, 2.55 MB | 50 rows, 0.01 MB + a 0.00 MB summary |
 | `/api/movements` | 50,000 rows, 16.00 MB | 50 rows, 0.02 MB |
 | `/api/purchases` | 30,000 rows, 12.19 MB | 50 rows, 0.02 MB, + 0.03 MB of alerts |
+| `/api/replenishment-recommendations` | 1,741 rows, 1.45 MB | 50 rows, 0.04 MB |
 | `/api/expenses` | 2,000 rows, 0.95 MB | 50 rows, 0.02 MB |
-| **total** | **31.69 MB** | **107 KB** |
+| **total** | **33.13 MB** | **151 KB** |
 
 `limit` stays optional on every one of them rather than defaulting to a page.
 An unpaged read is still the honest answer for a small warehouse and for

@@ -368,7 +368,7 @@ http://localhost:8000/docs
 | `POST` | `/api/purchases` | Admin, supervisor | Receive purchase and update stock |
 | `GET` | `/api/price-policy` | Admin, supervisor | Read price-increase threshold |
 | `PATCH` | `/api/price-policy` | Admin | Update price-increase threshold |
-| `GET` | `/api/replenishment-recommendations` | Admin, supervisor | Demand-based replenishment and supplier suggestions |
+| `GET` | `/api/replenishment-recommendations` | Admin, supervisor | One page of the ranked purchase plan; `item_id`, `limit`, `offset`, `X-Total-Count` |
 | `GET` | `/api/expenses` | Any authenticated user | One page of expenses; `limit`, `offset`, `X-Total-Count`; employee scope is limited to their own submissions |
 | `POST` | `/api/expenses` | Any authenticated user | Submit expense |
 | `PATCH` | `/api/expenses/{expense_id}/status` | Supervisor/admin depending on transition | Approve, reject, or pay expense |

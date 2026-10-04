@@ -83,3 +83,18 @@ test('a search that matches nothing says so instead of showing the first eight',
   await expect(page.locator('.picker-results li')).toHaveCount(1);
   await expect(page.locator('.picker-none')).toBeVisible();
 });
+
+test('the purchase guidance is fetched for the item picked, and follows it', async ({ page }) => {
+  // The ranked plan runs to ~1,700 lines at 10,000 items, so the dialog is no
+  // longer handed it to search; it asks for the one line it needs. The unit is
+  // what gives each item's guidance away.
+  await go(page, 'Procurement');
+  await page.click('button:has-text("Receive purchase")');
+
+  await pickItem(page, '4 x 6 shipping labels');
+  await expect(page.locator('.supplier-advice')).toContainText('rolls');
+
+  await pickItem(page, 'A4 copy paper');
+  await expect(page.locator('.supplier-advice')).toContainText('reams');
+  await expect(page.locator('.supplier-advice')).not.toContainText('rolls');
+});

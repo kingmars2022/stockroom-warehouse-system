@@ -377,8 +377,34 @@ def set_price_policy(payload: PricePolicyUpdate, db: Session = Depends(get_db), 
 
 
 @app.get("/api/replenishment-recommendations", response_model=list[ReplenishmentRecommendation])
-def list_replenishment_recommendations(_: User = Depends(require_roles(Role.admin, Role.supervisor)), db: Session = Depends(get_db)):
-    return cached_replenishment_recommendations(db)
+def list_replenishment_recommendations(
+    response: Response,
+    _: User = Depends(require_roles(Role.admin, Role.supervisor)),
+    db: Session = Depends(get_db),
+    item_id: uuid.UUID | None = Query(None, description="Just this item's guidance, for a dialog that needs one line of it."),
+    limit: int | None = Query(None, ge=1, le=MAX_PAGE),
+    offset: int = Query(0, ge=0),
+):
+    """One page of the ranked purchase plan, most urgent first.
+
+    The plan is computed and cached whole, because it is a ranking and a page
+    of it only means anything cut from the same ordering; the window is applied
+    to that. At 10,000 items it runs to about 1,700 lines and 1.45 MB, which
+    was the largest thing left on the sign-in path once every list was paged.
+
+    `item_id` is the other way to read it: the purchase dialog shows one item's
+    guidance, and it cannot find that line in a page it was not sent.
+    """
+    recommendations = cached_replenishment_recommendations(db)
+    if item_id is not None:
+        # Compared as text on purpose. The cached value round-trips through
+        # JSON, so these ids arrive as strings, while the engine itself yields
+        # uuid.UUID -- this must not depend on which path served the call.
+        wanted = str(item_id)
+        recommendations = [entry for entry in recommendations if str(entry["item_id"]) == wanted]
+    response.headers["X-Total-Count"] = str(len(recommendations))
+    window = recommendations[offset:]
+    return window[:limit] if limit is not None else window
 
 
 @app.get("/api/expenses", response_model=list[ExpenseResponse])
