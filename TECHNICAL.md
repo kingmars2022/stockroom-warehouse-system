@@ -385,6 +385,12 @@ An unpaged read is still the honest answer for a small warehouse and for
 anything scripted against this API; what changed is that nothing in the console
 asks for one.
 
+One list is deliberately left whole: `/api/suppliers`. The number of suppliers
+a warehouse buys from is bounded by the business rather than by how long the
+system has been running, and the Procurement page and the purchase form both
+want all of them at once. It is the one place a `<select>` is still the right
+control.
+
 ## Run it
 
 ```bash
