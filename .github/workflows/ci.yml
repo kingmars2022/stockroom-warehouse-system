@@ -18,6 +18,36 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
+  e2e:
+    runs-on: ubuntu-latest
+    # lint and build prove the console compiles, which says nothing about what
+    # it renders -- there was no frontend test of any kind until this. These
+    # drive the real console in a browser: the storage codes it spells out, the
+    # currency it prints, and the dark theme, all of which are invisible to a
+    # type checker and were previously only ever verified by hand.
+    #
+    # Playwright starts the dev server itself (see playwright.config.ts). It
+    # has to be the dev server: the console's demo mode is gated on
+    # NODE_ENV=development, and a production build would leave every test at a
+    # login it cannot complete.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Install the browser
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - name: Upload the report when something fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
   api:
     runs-on: ubuntu-latest
     # Redis runs as a service so the cache path is exercised against a real

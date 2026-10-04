@@ -82,7 +82,7 @@ class PurchaseCreate(BaseModel):
     supplier_id: UUID
     quantity: int = Field(gt=0)
     unit_cost: float = Field(gt=0)
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: str = Field(default="CAD", min_length=3, max_length=3)
     invoice_number: str = Field(default="", max_length=120)
     receipt_key: str | None = Field(default=None, max_length=512)
     receipt_version_id: str | None = Field(default=None, max_length=256)
@@ -107,7 +107,7 @@ class ExpenseCreate(BaseModel):
     supplier: str = Field(min_length=2, max_length=200)
     quantity: int = Field(gt=0)
     amount: float = Field(gt=0)
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: str = Field(default="CAD", min_length=3, max_length=3)
     purpose: str = Field(min_length=3, max_length=2000)
     receipt_key: str | None = Field(default=None, max_length=512)
     receipt_version_id: str | None = Field(default=None, max_length=256)

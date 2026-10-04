@@ -94,7 +94,7 @@ class Purchase(IdMixin, Base):
     received_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_cost: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    currency: Mapped[str] = mapped_column(String(3), default="CAD")
     invoice_number: Mapped[str] = mapped_column(String(120), default="")
     receipt_key: Mapped[str | None] = mapped_column(String(512))
     # The version that passed validation. A key on its own names whatever is
@@ -113,7 +113,7 @@ class Expense(IdMixin, TimestampMixin, Base):
     supplier: Mapped[str] = mapped_column(String(200), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     amount: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    currency: Mapped[str] = mapped_column(String(3), default="CAD")
     purpose: Mapped[str] = mapped_column(Text, nullable=False)
     receipt_key: Mapped[str | None] = mapped_column(String(512))
     receipt_version_id: Mapped[str | None] = mapped_column(String(256))
