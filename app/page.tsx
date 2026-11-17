@@ -40,7 +40,7 @@ type Supplier = { id: string; name: string; contact: string; leadDays: number; r
 // the one thing a warehouse with 10,000 SKUs cannot afford.
 type Movement = { id: string; kind: Kind; itemId: string; itemName: string; itemUnit: string; qty: number; actor: string; recipient: string; note: string; at: string };
 type Purchase = { id: string; itemId: string; itemName: string; itemUnit: string; supplierId: string; qty: number; unitCost: number; currency: string; receipt: string; receiptUrl?: string; invoice: string; at: string; priceChange: number };
-type Expense = { id: string; submitter: string; itemId: string; itemName: string; itemUnit: string; supplier: string; qty: number; amount: number; currency: string; receipt: string; receiptUrl?: string; purpose: string; status: ExpenseStatus; at: string; reviewer?: string };
+type Expense = { id: string; submitter: string; submitterId?: string; itemId: string; itemName: string; itemUnit: string; supplier: string; qty: number; amount: number; currency: string; receipt: string; receiptUrl?: string; purpose: string; status: ExpenseStatus; at: string; reviewer?: string };
 // What the dashboard needs about the catalogue without being sent it. These
 // three figures were reduced over every item in the warehouse in the browser,
 // which was the last thing keeping the whole catalogue here.
@@ -61,7 +61,7 @@ type SeedStore = Omit<Store, 'movements' | 'purchases' | 'expenses' | Derived> &
 // MongoDB audit-event payload carries, so the structured-search demo below has
 // real fields to filter on instead of only prose.
 type Audit = { id: string; actor: string; role: Role; action: string; target: string; detail: string; at: string; quantity?: number; priceChangePercent?: number };
-type User = { email: string; password?: string; name: string; role: Role; scope: string };
+type User = { id?: string; email: string; password?: string; name: string; role: Role; scope: string };
 type SupplierAdvice = { supplierId: string; supplierName: string; unitCost: number; currency: string; leadDays: number; rating: number; score: number };
 type Replenishment = { itemId: string; itemName: string; sku: string; unit: string; quantityOnHand: number; dailyUsage: number; daysOfCover: number | null; suggestedQuantity: number; recommendedSupplier: SupplierAdvice | null; alternatives: SupplierAdvice[] };
 // movements and purchases hold the page being read, not the history; the
@@ -250,10 +250,22 @@ const copyDemoStore = (): Store => withDemoDerived(nameItems(JSON.parse(JSON.str
 // The API speaks snake_case and the console camelCase. These sit at module
 // level because a page fetched by the pager has to be mapped the same way the
 // one fetched on sign-in was.
+// The inventory request for a filter. Shared, because a refresh after a write
+// has to ask for the same filtered page the table is showing: it asked for the
+// unfiltered one, so the search box kept its text over rows that ignored it.
+const itemsPath = (search: string, lowOnly: boolean) => {
+  const query = new URLSearchParams();
+  if (search.trim()) query.set('search', search.trim());
+  if (lowOnly) query.set('low_only', 'true');
+  return query.toString() ? `/api/items?${query}` : '/api/items';
+};
+// A receipt is stored under receipts/<user>/<uuid>-<name>; the name is the part
+// a person recognises, and the rest pushed it out of the table cell.
+const receiptLabel = (key: string) => key.split('/').pop()!.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i, '');
 const toItem = (item: ItemResponse): Item => ({ id: item.id, sku: item.sku, name: item.name, category: item.category, location: item.location, qty: item.quantity_on_hand, min: item.minimum_quantity, unit: item.unit });
 const toMovement = (movement: MovementResponse): Movement => ({ id: movement.id, kind: movement.kind, itemId: movement.item_id, itemName: movement.item_name, itemUnit: movement.item_unit, qty: movement.quantity, actor: movement.actor_name, recipient: movement.recipient, note: movement.note, at: movement.created_at });
 const toPurchase = (purchase: PurchaseResponse): Purchase => ({ id: purchase.id, itemId: purchase.item_id, itemName: purchase.item_name, itemUnit: purchase.item_unit, supplierId: purchase.supplier_id, qty: purchase.quantity, unitCost: Number(purchase.unit_cost), currency: purchase.currency, receipt: purchase.receipt_key || 'No attachment', invoice: purchase.invoice_number, at: purchase.created_at, priceChange: purchase.price_change_percent });
-const toExpense = (expense: ExpenseResponse): Expense => ({ id: expense.id, submitter: expense.submitter_name, itemId: expense.item_id || '', itemName: expense.item_name || '', itemUnit: expense.item_unit || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_name || undefined });
+const toExpense = (expense: ExpenseResponse): Expense => ({ id: expense.id, submitter: expense.submitter_name, submitterId: expense.submitter_id, itemId: expense.item_id || '', itemName: expense.item_name || '', itemUnit: expense.item_unit || '', supplier: expense.supplier, qty: expense.quantity, amount: Number(expense.amount), currency: expense.currency, receipt: expense.receipt_key || 'No attachment', purpose: expense.purpose, status: expense.status, at: expense.created_at, reviewer: expense.reviewer_name || undefined });
 const toAudit = (audit: AuditResponse): Audit => ({ id: audit.id, actor: audit.actor_name, role: audit.actor_role, action: audit.action, target: audit.target_type, detail: audit.detail, at: audit.created_at });
 const toRecommendation = (recommendation: ReplenishmentResponse): Replenishment => ({ itemId: recommendation.item_id, itemName: recommendation.item_name, sku: recommendation.sku, unit: recommendation.unit, quantityOnHand: recommendation.quantity_on_hand, dailyUsage: recommendation.daily_usage, daysOfCover: recommendation.days_of_cover, suggestedQuantity: recommendation.suggested_quantity, recommendedSupplier: recommendation.recommended_supplier ? { supplierId: recommendation.recommended_supplier.supplier_id, supplierName: recommendation.recommended_supplier.supplier_name, unitCost: Number(recommendation.recommended_supplier.unit_cost), currency: recommendation.recommended_supplier.currency, leadDays: recommendation.recommended_supplier.lead_days, rating: recommendation.recommended_supplier.rating, score: recommendation.recommended_supplier.score } : null, alternatives: recommendation.alternatives.map((option: SupplierRecommendation) => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency, leadDays: option.lead_days, rating: option.rating, score: option.score })) });
 const toPriceAlert = (alert: PriceAlertResponse): PriceAlert => ({ ...toPurchase(alert), supplierName: alert.supplier_name, alternatives: alert.alternatives.map(option => ({ supplierId: option.supplier_id, supplierName: option.supplier_name, unitCost: Number(option.unit_cost), currency: option.currency })) });
@@ -303,15 +315,19 @@ export default function Home() {
   // cascade.
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setLocaleState(stored<Locale>('stockroom-locale', 'en')); }, []);
+  // What the inventory table is filtered by, readable from `refresh` without
+  // making it a dependency (which would re-run the sign-in effect on each key).
+  const inventoryFilter = useRef({ search: '', lowOnly: false });
   const refresh = useCallback(async () => {
     const current = await api<MeResponse>('/api/me');
     const nextUser: User = { ...current, scope: current.role === 'admin' ? 'All warehouses and financial data' : current.role === 'supervisor' ? 'Warehouse operations and purchasing' : 'Own stock issues and reimbursements' };
     // One page of each list, plus the catalogue's figures as figures. Signing
     // in used to download the whole warehouse: every item, every movement,
     // every purchase, every claim -- 31.69 MB at 10,000 SKUs.
-    const [items, summary, movements, expenses] = await Promise.all([
-      apiPage<ItemResponse>('/api/items', PAGE_SIZE, 0),
+    const [items, summary, companyAppearance, movements, expenses] = await Promise.all([
+      apiPage<ItemResponse>(itemsPath(inventoryFilter.current.search, inventoryFilter.current.lowOnly), PAGE_SIZE, 0),
       api<ItemSummaryResponse>('/api/items/summary'),
+      api<Appearance>('/api/appearance-policy'),
       apiPage<MovementResponse>('/api/movements', PAGE_SIZE, 0),
       apiPage<ExpenseResponse>('/api/expenses', PAGE_SIZE, 0),
     ]);
@@ -353,7 +369,10 @@ export default function Home() {
       replenishmentTotal: replenishment.total,
       replenishment: replenishment.rows.map(toRecommendation),
       threshold: policy.threshold_percent,
-      defaultAppearance,
+      // From the server. This used to be reset to the built-in default on
+      // every refresh, so an administrator's choice lasted until the next
+      // write -- and was never anyone else's default at all.
+      defaultAppearance: companyAppearance,
     });
     // Both histories were just re-read from the top; leaving the indexes where
     // they were would label page one as page four.
@@ -393,7 +412,10 @@ export default function Home() {
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [appearance]);
-  const tell = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(''), 2800); };
+  // One timer, restarted. Each notice used to start its own, so a second one
+  // shown two seconds after the first was cleared by the first one's timer.
+  const noticeTimer = useRef<number | undefined>(undefined);
+  const tell = (message: string) => { setNotice(message); window.clearTimeout(noticeTimer.current); noticeTimer.current = window.setTimeout(() => setNotice(''), 2800); };
   const audit = (actor: User, action: string, target: string, detail: string) => ({ id: crypto.randomUUID(), actor: actor.name, role: actor.role, action, target, detail, at: new Date().toISOString() });
   const canManage = user?.role === 'admin';
   const canApprove = user?.role === 'admin' || user?.role === 'supervisor';
@@ -405,14 +427,16 @@ export default function Home() {
   // Demo mode holds the catalogue, so it filters and windows it here. Real mode
   // asks the server for the page it wants, filter and all.
   const demoItems = useMemo(() => store.items.filter(item => `${item.name} ${item.sku} ${item.category} ${item.location}`.toLowerCase().includes(search.toLowerCase())).filter(item => !lowOnly || item.qty <= item.min), [store.items, search, lowOnly]);
+  const itemRequest = useRef(0);
   const loadItemPage = async (page: number, nextSearch: string, nextLow: boolean) => {
     if (!localDemoAuth) {
-      const query = new URLSearchParams();
-      if (nextSearch.trim()) query.set('search', nextSearch.trim());
-      if (nextLow) query.set('low_only', 'true');
-      const path = query.toString() ? `/api/items?${query}` : '/api/items';
+      // The debounce spaces the requests out; it does not order the answers.
+      // A slow reply for "la" landing after the one for "label" would put the
+      // wrong rows under the search box, so only the latest request may write.
+      const ticket = ++itemRequest.current;
       try {
-        const { rows, total } = await apiPage<ItemResponse>(path, PAGE_SIZE, page * PAGE_SIZE);
+        const { rows, total } = await apiPage<ItemResponse>(itemsPath(nextSearch, nextLow), PAGE_SIZE, page * PAGE_SIZE);
+        if (ticket !== itemRequest.current) return;
         setStore(value => ({ ...value, items: rows.map(toItem), itemTotal: total }));
       } catch (error) { tell(error instanceof Error ? error.message : 'That page of inventory could not be loaded.'); return; }
     }
@@ -423,10 +447,11 @@ export default function Home() {
   const searchDebounce = useRef<number | undefined>(undefined);
   const changeSearch = (next: string) => {
     setSearch(next);
+    inventoryFilter.current.search = next;
     window.clearTimeout(searchDebounce.current);
     searchDebounce.current = window.setTimeout(() => { void loadItemPage(0, next, lowOnly); }, 200);
   };
-  const changeLowOnly = (next: boolean) => { setLowOnly(next); void loadItemPage(0, search, next); };
+  const changeLowOnly = (next: boolean) => { setLowOnly(next); inventoryFilter.current.lowOnly = next; void loadItemPage(0, search, next); };
   // Server-derived: filtering the purchase list would now mean "alerts among
   // the fifty most recent purchases", which is not what the card claims.
   const priceAlerts = store.priceAlerts;
@@ -452,8 +477,9 @@ export default function Home() {
   };
   // Demo mode holds the whole history, so it windows it here; real mode was
   // sent exactly one page and shows it as it is.
-  const itemWindow = pageWindow(localDemoAuth ? demoItems.length : store.itemTotal, itemPageIndex, page => void loadItemPage(page, search, lowOnly));
-  const itemRows = localDemoAuth ? demoItems.slice(itemWindow.page * PAGE_SIZE, itemWindow.page * PAGE_SIZE + PAGE_SIZE) : store.items;
+  const itemSpan = pageWindow(localDemoAuth ? demoItems.length : store.itemTotal, itemPageIndex);
+  const itemRows = localDemoAuth ? demoItems.slice(itemSpan.page * PAGE_SIZE, itemSpan.page * PAGE_SIZE + PAGE_SIZE) : store.items;
+  const itemWindow: PageWindow = { ...itemSpan, setPage: page => void loadItemPage(page, search, lowOnly) };
   const loadExpensePage = async (page: number) => {
     if (!localDemoAuth) {
       try {
@@ -481,14 +507,18 @@ export default function Home() {
     }
     setPlanPageIndex(page);
   };
-  const movementWindow = pageWindow(localDemoAuth ? visibleMoves.length : store.movementTotal, movementPageIndex, page => void showMovementPage(page));
-  const movementRows = localDemoAuth ? visibleMoves.slice(movementWindow.page * PAGE_SIZE, movementWindow.page * PAGE_SIZE + PAGE_SIZE) : visibleMoves;
-  const purchaseWindow = pageWindow(localDemoAuth ? store.purchases.length : store.purchaseTotal, purchasePageIndex, page => void showPurchasePage(page));
-  const purchaseRows = localDemoAuth ? store.purchases.slice(purchaseWindow.page * PAGE_SIZE, purchaseWindow.page * PAGE_SIZE + PAGE_SIZE) : store.purchases;
-  const expenseWindow = pageWindow(localDemoAuth ? visibleExpenses.length : store.expenseTotal, expensePageIndex, page => void loadExpensePage(page));
-  const expenseRows = localDemoAuth ? visibleExpenses.slice(expenseWindow.page * PAGE_SIZE, expenseWindow.page * PAGE_SIZE + PAGE_SIZE) : visibleExpenses;
-  const auditWindow = pageWindow(localDemoAuth ? store.audits.length : store.auditTotal, auditPageIndex, page => void loadAuditPage(page));
-  const auditRows = localDemoAuth ? store.audits.slice(auditWindow.page * PAGE_SIZE, auditWindow.page * PAGE_SIZE + PAGE_SIZE) : store.audits;
+  const movementSpan = pageWindow(localDemoAuth ? visibleMoves.length : store.movementTotal, movementPageIndex);
+  const movementRows = localDemoAuth ? visibleMoves.slice(movementSpan.page * PAGE_SIZE, movementSpan.page * PAGE_SIZE + PAGE_SIZE) : visibleMoves;
+  const movementWindow: PageWindow = { ...movementSpan, setPage: page => void showMovementPage(page) };
+  const purchaseSpan = pageWindow(localDemoAuth ? store.purchases.length : store.purchaseTotal, purchasePageIndex);
+  const purchaseRows = localDemoAuth ? store.purchases.slice(purchaseSpan.page * PAGE_SIZE, purchaseSpan.page * PAGE_SIZE + PAGE_SIZE) : store.purchases;
+  const purchaseWindow: PageWindow = { ...purchaseSpan, setPage: page => void showPurchasePage(page) };
+  const expenseSpan = pageWindow(localDemoAuth ? visibleExpenses.length : store.expenseTotal, expensePageIndex);
+  const expenseRows = localDemoAuth ? visibleExpenses.slice(expenseSpan.page * PAGE_SIZE, expenseSpan.page * PAGE_SIZE + PAGE_SIZE) : visibleExpenses;
+  const expenseWindow: PageWindow = { ...expenseSpan, setPage: page => void loadExpensePage(page) };
+  const auditSpan = pageWindow(localDemoAuth ? store.audits.length : store.auditTotal, auditPageIndex);
+  const auditRows = localDemoAuth ? store.audits.slice(auditSpan.page * PAGE_SIZE, auditSpan.page * PAGE_SIZE + PAGE_SIZE) : store.audits;
+  const auditWindow: PageWindow = { ...auditSpan, setPage: page => void loadAuditPage(page) };
   // What the dialogs search with. Demo mode filters memory; otherwise it is
   // one request per keystroke-batch, and the server does the matching.
   const findItems = useCallback<ItemSearch>(async (query: string) => {
@@ -507,8 +537,9 @@ export default function Home() {
     const { shown } = await findItems(wanted);
     return shown.find(item => item.sku.toLowerCase() === wanted) || null;
   }, [findItems]);
-  const planWindow = pageWindow(localDemoAuth ? store.replenishment.length : store.replenishmentTotal, planPageIndex, page => void loadPlanPage(page));
-  const planRows = localDemoAuth ? store.replenishment.slice(planWindow.page * PAGE_SIZE, planWindow.page * PAGE_SIZE + PAGE_SIZE) : store.replenishment;
+  const planSpan = pageWindow(localDemoAuth ? store.replenishment.length : store.replenishmentTotal, planPageIndex);
+  const planRows = localDemoAuth ? store.replenishment.slice(planSpan.page * PAGE_SIZE, planSpan.page * PAGE_SIZE + PAGE_SIZE) : store.replenishment;
+  const planWindow: PageWindow = { ...planSpan, setPage: page => void loadPlanPage(page) };
   // One item's line, for the purchase dialog. It cannot find it in a page it
   // was not sent, and a ranked plan of 1,700 lines is not one to send.
   const adviseOn = useCallback(async (itemId: string) => {
@@ -517,11 +548,23 @@ export default function Home() {
     return rows.length ? toRecommendation(rows[0]) : null;
   }, [store.replenishment]);
   const navigateInventory = (low = false) => { changeLowOnly(low); setView('inventory'); };
-  const logout = async () => { if (!localDemoAuth) await cognitoLogout(); setUser(null); setStore(emptyStore()); setView('dashboard'); };
+  const logout = async () => {
+    if (!localDemoAuth) await cognitoLogout();
+    // Everything the last person was looking at goes with them. The console
+    // runs on shared terminals, and the next sign-in used to open on the
+    // previous user's search text, agent answer and audit search results.
+    window.clearTimeout(searchDebounce.current);
+    inventoryFilter.current = { search: '', lowOnly: false };
+    setSearch(''); setLowOnly(false); setDialog(null); setPurchaseSeed(null); setMenu(false);
+    setAgentInstruction(''); setAgentResult(null); setAgentError('');
+    setAuditEvents(null); setAuditEventFilters({ action: '', minQuantity: '', minPriceChangePercent: '' }); setIngestResult(null);
+    setItemPageIndex(0); setMovementPageIndex(0); setPurchasePageIndex(0); setExpensePageIndex(0); setAuditPageIndex(0); setPlanPageIndex(0);
+    setUser(null); setStore(emptyStore()); setView('dashboard');
+  };
   const login = async (email: string, password: string) => {
     if (localDemoAuth) {
       const account = demoAccounts.find(entry => entry.email === email && entry.password === password);
-      if (!account) throw new Error('Use one of the local demo accounts shown below.');
+      if (!account) throw new Error('Use one of the demo accounts shown below.');
       setUser(account); setStore(copyDemoStore()); return;
     }
     await authenticate(email, password); await refresh();
@@ -592,9 +635,12 @@ export default function Home() {
       await refresh(); setDialog(null); tell('Reimbursement submitted for approval.');
     } catch (error) { tell(error instanceof Error ? error.message : 'Expense could not be submitted.'); }
   };
+  // Mirrors the API's rule: the approval step is a second person signing off.
+  const isOwnExpense = (expense: Expense) => Boolean(user) && (expense.submitterId ? expense.submitterId === user!.id : expense.submitter === user!.name);
   const updateExpense = async (expense: Expense, status: ExpenseStatus) => {
     try {
       if (localDemoAuth && user) {
+        if (status !== 'paid' && isOwnExpense(expense)) throw new Error('You cannot review your own reimbursement; another supervisor or administrator has to.');
         setStore(value => ({ ...value, expenses: value.expenses.map(entry => entry.id === expense.id ? { ...entry, status, reviewer: user.name } : entry), audits: [audit(user, `Marked reimbursement ${status}`, expense.supplier, `${money(expense.amount)} reimbursement marked ${status}`), ...value.audits] }));
         tell(`Expense marked ${status}.`); return;
       }
@@ -603,6 +649,10 @@ export default function Home() {
     catch (error) { tell(error instanceof Error ? error.message : 'Expense status could not be updated.'); }
   };
   const updatePriceThreshold = async (value: number) => {
+    // The field saves when focus leaves it, so it is called with an unchanged
+    // value every time someone tabs through. That was a request, a full
+    // refresh and an audit entry reading "changed from 15% to 15%".
+    if (Math.max(1, Math.round(value)) === store.threshold) return;
     try {
       // Through withDemoDerived: the threshold is what decides which purchases
       // are alerts, and those are no longer filtered at the point of use.
@@ -611,12 +661,21 @@ export default function Home() {
     }
     catch (error) { tell(error instanceof Error ? error.message : 'Price policy could not be updated.'); }
   };
-  const updateCompanyAppearance = (next: Appearance) => {
+  const updateCompanyAppearance = async (next: Appearance) => {
     if (!user || !canManage) return;
     const current = store.defaultAppearance;
     if (current.mode === next.mode && current.accent === next.accent && current.density === next.density) return;
-    setStore(value => ({ ...value, defaultAppearance: next, audits: [audit(user, 'Updated company appearance', 'Settings', `Default theme: ${next.mode}; accent: ${next.accent}; density: ${next.density}`), ...value.audits] }));
-    tell('Company default appearance updated.');
+    if (localDemoAuth) {
+      setStore(value => ({ ...value, defaultAppearance: next, audits: [audit(user, 'Updated company appearance', 'Settings', `Default theme: ${next.mode}; accent: ${next.accent}; density: ${next.density}`), ...value.audits] }));
+      tell('Company default appearance updated.'); return;
+    }
+    // Saved, not just shown. Outside the demo this only ever changed the
+    // administrator's own screen, added an audit row that existed nowhere but
+    // in that browser, and reverted the next time anything refreshed.
+    try {
+      await api('/api/appearance-policy', { method: 'PATCH', body: JSON.stringify(next) });
+      await refresh(); tell('Company default appearance updated.');
+    } catch (error) { tell(error instanceof Error ? error.message : 'The company appearance could not be saved.'); }
   };
   const openPurchase = (seed: PurchaseSeed | null = null) => { setPurchaseSeed(seed); setDialog('purchase'); };
   const approveProposal = async (proposal: AgentProposal) => {
@@ -714,9 +773,9 @@ export default function Home() {
         {view === 'inventory' && <Inventory items={itemRows} pager={itemWindow} search={search} setSearch={changeSearch} lowOnly={lowOnly} clearLow={() => changeLowOnly(false)} canManage={canManage} add={() => setDialog('item')} />}
         {view === 'activity' && canSeeActivity && <Activity movements={movementRows} pager={movementWindow} />}
         {view === 'procurement' && canReceive && <Procurement purchases={purchaseRows} pager={purchaseWindow} suppliers={store.suppliers} alerts={priceAlerts} replenishment={planRows} planPager={planWindow} threshold={store.threshold} canManage={canManage} setThreshold={updatePriceThreshold} add={() => openPurchase()} agentInstruction={agentInstruction} setAgentInstruction={setAgentInstruction} agentBusy={agentBusy} agentResult={agentResult} agentError={agentError} runAgent={runAgent} approveProposal={approveProposal} showIngest={!localDemoAuth && canManage} ingestBusy={ingestBusy} ingestResult={ingestResult} runSupplierIngest={runSupplierIngest} />}
-        {view === 'expenses' && <Expenses expenses={expenseRows} pager={expenseWindow} canApprove={canApprove} canPay={canManage} add={() => setDialog('expense')} update={updateExpense} />}
+        {view === 'expenses' && <Expenses expenses={expenseRows} pager={expenseWindow} isOwn={isOwnExpense} canApprove={canApprove} canPay={canManage} add={() => setDialog('expense')} update={updateExpense} />}
         {view === 'audit' && canAudit && <AuditLog audits={auditRows} pager={auditWindow} eventFilters={auditEventFilters} setEventFilters={setAuditEventFilters} events={auditEvents} eventsBusy={auditEventsBusy} search={searchAuditEvents} />}
-        {view === 'settings' && <AppearanceSettings preference={appearancePreference} companyDefault={store.defaultAppearance} canManage={canManage} updatePreference={updateAppearancePreference} updateCompanyDefault={updateCompanyAppearance} />}
+        {view === 'settings' && <AppearanceSettings preference={appearancePreference} companyDefault={store.defaultAppearance} canManage={canManage} updatePreference={updateAppearancePreference} updateCompanyDefault={next => void updateCompanyAppearance(next)} />}
       </div>
     </section>
     {notice && <div role="status" className="toast">{notice}</div>}
@@ -742,7 +801,7 @@ function Activity({ movements, pager }: { movements: Movement[]; pager: PageWind
 function Procurement({ purchases, pager, suppliers, alerts, replenishment, planPager, threshold, canManage, setThreshold, add, agentInstruction, setAgentInstruction, agentBusy, agentResult, agentError, runAgent, approveProposal, showIngest, ingestBusy, ingestResult, runSupplierIngest }: { purchases: Purchase[]; pager: PageWindow; suppliers: Supplier[]; alerts: PriceAlert[]; replenishment: Replenishment[]; planPager: PageWindow; threshold: number; canManage: boolean; setThreshold: (value: number) => void; add: () => void; agentInstruction: string; setAgentInstruction: (value: string) => void; agentBusy: boolean; agentResult: AgentRunResponse | null; agentError: string; runAgent: () => void; approveProposal: (proposal: AgentProposal) => void; showIngest: boolean; ingestBusy: boolean; ingestResult: SupplierPriceIngestResponse | null; runSupplierIngest: () => void }) { return <><div className="procurement-top"><section className="panel price-policy"><div><p className="eyebrow">Price monitoring</p><h3>Alert when a purchase price rises by</h3><p className="small-copy">Compare the newest price with the prior purchase of the same item.</p></div>{canManage ? <label className="threshold"><input type="number" min="1" defaultValue={threshold} key={threshold} onBlur={event => setThreshold(Number(event.currentTarget.value) || 1)} />%</label> : <strong>{threshold}%</strong>}</section><section className="panel supplier-summary"><PanelHeading title="Supplier coverage" note="Preferred and backup options" />{suppliers.map(supplier => <div key={supplier.id} className="supplier-row"><div><b>{supplier.name}</b><small>{supplier.leadDays}-day lead time · {supplier.rating}/5 rating</small></div><Status tone={supplier.status === 'preferred' ? 'good' : supplier.status === 'paused' ? 'danger' : 'neutral'}>{supplier.status}</Status></div>)}</section></div>{showIngest && <section className="panel ingest-panel"><div className="panel-heading"><div><h3>Supplier price submissions</h3><p>Drain the webhook inbox suppliers push signed price quotes into via API Gateway.</p></div><button onClick={runSupplierIngest} disabled={ingestBusy}>{ingestBusy ? 'Checking…' : 'Check now'}</button></div>{ingestResult && <div className="ingest-summary"><p>{ingestResult.processed} submission{ingestResult.processed === 1 ? '' : 's'} processed.</p><div className="ingest-chips">{ingestResult.results.map((result, index) => <span key={index} className={`ingest-chip ${result.status}`}>{result.sku || 'unknown'}: {result.status.replaceAll('_', ' ')}{result.price_change_percent !== undefined ? ` (${result.price_change_percent > 0 ? '+' : ''}${result.price_change_percent}%)` : ''}</span>)}{!ingestResult.results.length && <span className="ingest-chip recorded">Inbox is empty</span>}</div></div>}</section>}<section className="panel agent-panel"><PanelHeading title="Procurement agent" note="Ask what to reorder. It can only propose a purchase, never place one." />{agentError && <p className="agent-error">{agentError}</p>}<div className="agent-ask"><input value={agentInstruction} onChange={event => setAgentInstruction(event.target.value)} placeholder="What should we reorder this week?" disabled={agentBusy} /><button className="primary" onClick={runAgent} disabled={agentBusy}><Bot size={16} />{agentBusy ? 'Thinking…' : 'Ask the agent'}</button></div>{agentResult && <div className="agent-result"><p className="agent-summary">{agentResult.summary}</p>{agentResult.steps.length > 0 && <div className="agent-steps">{agentResult.steps.map((step, index) => <span key={index} className={`agent-step ${step.ok ? 'ok' : 'failed'}`}>{step.tool}</span>)}</div>}{agentResult.proposals.map(proposal => <div className="proposal-row" key={`${proposal.sku}-${proposal.supplier_id}`}><div><b>{proposal.item_name}</b><small>{proposal.reason}</small></div><div><strong>Order {proposal.quantity} {proposal.unit}</strong><small>{proposal.supplier_name}{proposal.differs_from_engine ? ` · engine suggested ${proposal.engine_suggested_quantity}` : ''}</small></div><button className="secondary" onClick={() => void approveProposal(proposal)}>Review &amp; approve</button></div>)}{!agentResult.proposals.length && <Empty label="Nothing needs ordering right now." />}</div>}</section>{replenishment.length > 0 && <section className="panel recommendation-panel"><PanelHeading title="Recommended purchase plan" note="Ranked by latest price, lead time, supplier rating, and preferred status" />{replenishment.map(recommendation => <div className="recommendation-row" key={recommendation.itemId}><div><b>{recommendation.itemName}</b><small>{recommendation.quantityOnHand} {recommendation.unit} on hand · {recommendation.daysOfCover === null ? 'low stock' : `${recommendation.daysOfCover} days of cover`}</small></div><div><strong>Order {recommendation.suggestedQuantity} {recommendation.unit}</strong><small>{recommendation.recommendedSupplier ? `Recommended: ${recommendation.recommendedSupplier.supplierName} · ${money(recommendation.recommendedSupplier.unitCost, recommendation.recommendedSupplier.currency)} · ${recommendation.recommendedSupplier.leadDays}-day lead time` : 'No supplier price history yet'}</small></div></div>)}<Pager {...planPager} label="items to order" /></section>}<section className="panel"><div className="table-tools"><div><b>Purchases and price history</b><small className="block-note">Each receipt updates price history and may produce an alert.</small></div><button className="primary" onClick={add}><Plus size={17} />Receive purchase</button></div><div className="table-wrap"><table><thead><tr><th>Purchase date</th><th>Item / supplier</th><th>Quantity</th><th>Unit cost</th><th>Change</th><th>Attachment</th></tr></thead><tbody>{purchases.map(purchase => { const supplier = suppliers.find(entry => entry.id === purchase.supplierId); return <tr key={purchase.id}><td>{date(purchase.at)}</td><td><b>{purchase.itemName}</b><small>{supplier?.name} · {purchase.invoice}</small></td><td>{purchase.qty} {purchase.itemUnit}</td><td><b>{money(purchase.unitCost, purchase.currency)}</b></td><td><span className={purchase.priceChange >= threshold ? 'price-up' : purchase.priceChange < 0 ? 'price-down' : 'price-flat'}>{purchase.priceChange > 0 ? <TrendingUp size={14} /> : purchase.priceChange < 0 ? <TrendingDown size={14} /> : null}{purchase.priceChange === 0 ? 'First price' : `${purchase.priceChange > 0 ? '+' : ''}${purchase.priceChange}%`}</span></td><td><ReceiptAttachment name={purchase.receipt} url={purchase.receiptUrl} /></td></tr>; })}</tbody></table></div><Pager {...pager} label="purchases" /></section>{alerts.length > 0 && <section className="panel alert-panel"><PanelHeading title="Supplier review recommended" note="These purchases exceeded the configured price-increase threshold." />{alerts.map(alert => <div key={alert.id} className="alert-row"><TriangleAlert size={19} /><div><b>{alert.itemName} increased {alert.priceChange}%</b><small>{alert.supplierName} charged {money(alert.unitCost, alert.currency)}. Alternative recent prices: {alert.alternatives.map(option => `${option.supplierName} ${money(option.unitCost, option.currency)}`).join(', ') || 'No alternate supplier data yet'}.</small></div></div>)}</section>}</>;
 }
 
-function Expenses({ expenses, pager, canApprove, canPay, add, update }: { expenses: Expense[]; pager: PageWindow; canApprove: boolean; canPay: boolean; add: () => void; update: (expense: Expense, status: ExpenseStatus) => void }) { return <section className="panel"><div className="table-tools"><div><b>Reimbursements</b><small className="block-note">Receipts, approval history, and payment state.</small></div><button className="primary" onClick={add}><Plus size={17} />Submit expense</button></div><div className="table-wrap"><table><thead><tr><th>Submitted</th><th>Employee / item</th><th>Supplier / purpose</th><th>Receipt</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{expenses.map(expense => <tr key={expense.id}><td>{date(expense.at)}</td><td><b>{expense.submitter}</b><small>{expense.itemName} · {expense.qty} {expense.itemUnit}</small></td><td><b>{expense.supplier}</b><small>{expense.purpose}</small></td><td><ReceiptAttachment name={expense.receipt} url={expense.receiptUrl} /></td><td><b>{money(expense.amount, expense.currency)}</b></td><td><Status tone={expense.status === 'paid' || expense.status === 'approved' ? 'good' : expense.status === 'rejected' ? 'danger' : 'warn'}>{expense.status}</Status>{expense.reviewer && <small>{expense.reviewer}</small>}</td><td><div className="row-actions">{expense.status === 'submitted' && canApprove && <><IconButton label="Approve reimbursement" onClick={() => update(expense, 'approved')}><Check size={16} /></IconButton><IconButton label="Reject reimbursement" onClick={() => update(expense, 'rejected')}><XCircle size={16} /></IconButton></>}{expense.status === 'approved' && canPay && <button className="pay-button" onClick={() => update(expense, 'paid')}>Mark paid</button>}</div></td></tr>)}{!expenses.length && <tr><td colSpan={7}><Empty label="No reimbursement submissions in your visible scope." /></td></tr>}</tbody></table></div><Pager {...pager} label="reimbursements" /></section>; }
+function Expenses({ expenses, pager, isOwn, canApprove, canPay, add, update }: { expenses: Expense[]; pager: PageWindow; isOwn: (expense: Expense) => boolean; canApprove: boolean; canPay: boolean; add: () => void; update: (expense: Expense, status: ExpenseStatus) => void }) { return <section className="panel"><div className="table-tools"><div><b>Reimbursements</b><small className="block-note">Receipts, approval history, and payment state.</small></div><button className="primary" onClick={add}><Plus size={17} />Submit expense</button></div><div className="table-wrap"><table><thead><tr><th>Submitted</th><th>Employee / item</th><th>Supplier / purpose</th><th>Receipt</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>{expenses.map(expense => <tr key={expense.id}><td>{date(expense.at)}</td><td><b>{expense.submitter}</b><small>{expense.itemName} · {expense.qty} {expense.itemUnit}</small></td><td><b>{expense.supplier}</b><small>{expense.purpose}</small></td><td><ReceiptAttachment name={expense.receipt} url={expense.receiptUrl} /></td><td><b>{money(expense.amount, expense.currency)}</b></td><td><Status tone={expense.status === 'paid' || expense.status === 'approved' ? 'good' : expense.status === 'rejected' ? 'danger' : 'warn'}>{expense.status}</Status>{expense.reviewer && <small>{expense.reviewer}</small>}</td><td><div className="row-actions">{expense.status === 'submitted' && canApprove && (isOwn(expense) ? <small className="own-claim">Needs another reviewer</small> : <><IconButton label="Approve reimbursement" onClick={() => update(expense, 'approved')}><Check size={16} /></IconButton><IconButton label="Reject reimbursement" onClick={() => update(expense, 'rejected')}><XCircle size={16} /></IconButton></>)}{expense.status === 'approved' && canPay && <button className="pay-button" onClick={() => update(expense, 'paid')}>Mark paid</button>}</div></td></tr>)}{!expenses.length && <tr><td colSpan={7}><Empty label="No reimbursement submissions in your visible scope." /></td></tr>}</tbody></table></div><Pager {...pager} label="reimbursements" /></section>; }
 
 function AuditLog({ audits, pager, eventFilters, setEventFilters, events, eventsBusy, search }: { audits: Audit[]; pager: PageWindow; eventFilters: { action: string; minQuantity: string; minPriceChangePercent: string }; setEventFilters: (value: { action: string; minQuantity: string; minPriceChangePercent: string }) => void; events: AuditEventResponse[] | null; eventsBusy: boolean; search: () => void }) {
   return <><section className="panel audit-search-panel"><PanelHeading title="Search structured audit events" note="Query the MongoDB documents by fields a specific action actually carries — not just who and when." /><div className="audit-filters"><input placeholder="Action contains… (e.g. issued_stock)" value={eventFilters.action} onChange={event => setEventFilters({ ...eventFilters, action: event.target.value })} /><input placeholder="Min quantity" type="number" value={eventFilters.minQuantity} onChange={event => setEventFilters({ ...eventFilters, minQuantity: event.target.value })} /><input placeholder="Min price change %" type="number" value={eventFilters.minPriceChangePercent} onChange={event => setEventFilters({ ...eventFilters, minPriceChangePercent: event.target.value })} /><button className="secondary" onClick={search} disabled={eventsBusy}><Search size={15} />{eventsBusy ? 'Searching…' : 'Search'}</button></div>{events !== null && <div className="audit-events-list">{events.map(event => <div key={event.id} className="audit-event-row"><div><b>{event.action}</b><small>{event.actor.name} · {roleLabel[event.actor.role]} · {date(event.created_at)}</small></div><p className="event-detail">{event.detail}</p><div className="event-payload">{Object.entries(event.payload).filter(([key]) => !key.endsWith('_id')).map(([key, value]) => <span key={key} className="payload-chip">{key.replaceAll('_', ' ')}: {String(value)}</span>)}</div></div>)}{!events.length && <Empty label="No structured events match this search." />}</div>}</section><section className="panel"><PanelHeading title="Administrative audit log" note="Immutable history of the actions performed in this system." /><div className="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Role</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead><tbody>{audits.map(entry => <tr key={entry.id}><td>{date(entry.at)}</td><td><b>{entry.actor}</b></td><td><Status tone={entry.role === 'admin' ? 'good' : entry.role === 'supervisor' ? 'neutral' : 'warn'}>{roleLabel[entry.role]}</Status></td><td>{entry.action}</td><td><b>{entry.target}</b></td><td>{entry.detail}</td></tr>)}</tbody></table></div><Pager {...pager} label="entries" /></section></>;
@@ -759,15 +818,22 @@ function AppearanceControls({ value, onChange }: { value: Appearance; onChange: 
   return <div className="appearance-controls"><div><b>{t('theme', 'Theme')}</b><div className="segmented">{modes.map(option => <button key={option.value} type="button" className={value.mode === option.value ? 'selected' : ''} onClick={() => onChange({ mode: option.value })} aria-pressed={value.mode === option.value}>{option.label}</button>)}</div></div><div><b>{t('accentColor', 'Accent color')}</b><div className="swatches">{accents.map(option => <button key={option.value} type="button" className={value.accent === option.value ? `selected ${option.value}` : option.value} onClick={() => onChange({ accent: option.value })} aria-label={option.label} title={option.label} aria-pressed={value.accent === option.value}><span /></button>)}</div></div><div><b>{t('density', 'Information density')}</b><div className="segmented">{(['comfortable', 'compact'] as Density[]).map(option => <button key={option} type="button" className={value.density === option ? 'selected' : ''} onClick={() => onChange({ density: option })} aria-pressed={value.density === option}>{t(option, option === 'comfortable' ? 'Comfortable' : 'Compact')}</button>)}</div></div></div>;
 }
 function ReceiptAttachment({ name, url }: { name: string; url?: string }) {
-  const content = <><FileText size={14} />{name}</>;
+  const [problem, setProblem] = useState('');
+  const content = <><FileText size={14} />{receiptLabel(name)}</>;
   if (url) return <a className="file-name" href={url} target="_blank" rel="noreferrer">{content}</a>;
   if (name === 'No attachment') return <span className="file-name">{content}</span>;
+  // The demo keeps a receipt's name and nothing else. Offering it as a button
+  // opened a blank tab, failed to reach an API that is not there, and closed it.
+  if (localDemoAuth) return <span className="file-name" title="Receipt files are not stored in the demo">{content}</span>;
   const open = async () => {
     const tab = window.open('', '_blank');
+    setProblem('');
     try { const response = await api<{ download_url: string }>(`/api/attachments/download?key=${encodeURIComponent(name)}`); if (tab) tab.location.href = response.download_url; else window.location.href = response.download_url; }
-    catch { tab?.close(); }
+    // Said, not swallowed: "still being validated" and "not yours to view" both
+    // used to look like a tab that opened and shut.
+    catch (error) { tab?.close(); setProblem(error instanceof Error ? error.message : 'This receipt could not be opened.'); }
   };
-  return <button type="button" className="file-name" onClick={open}>{content}</button>;
+  return <><button type="button" className="file-name" onClick={open}>{content}</button>{problem && <small className="receipt-problem" role="alert">{problem}</small>}</>;
 }
 function PanelHeading({ title, note, action, onClick }: { title: string; note: string; action?: string; onClick?: () => void }) { return <div className="panel-heading"><div><h3>{title}</h3><p>{note}</p></div>{action && <button onClick={onClick}>{action}</button>}</div>; }
 function MovementRow({ movement }: { movement: Movement }) { const inbound = movement.kind === 'inbound'; return <div className="move-row"><span className={`move-icon ${inbound ? 'in' : 'out'}`}>{inbound ? <ArrowDownToLine size={16} /> : <ArrowUpFromLine size={16} />}</span><div><b>{movement.itemName}</b><small>{movement.recipient} · {date(movement.at)}</small></div><strong className={inbound ? 'amount-in' : 'amount-out'}>{inbound ? '+' : '-'}{movement.qty} {movement.itemUnit}</strong></div>; }
@@ -790,14 +856,14 @@ type PageWindow = { from: number; to: number; total: number; page: number; pages
  * purchase history) -- the pager reads the same either way, because what it
  * says has to be true of the whole list and not of the page.
  */
-function pageWindow(total: number, page: number, setPage: (value: number) => void): PageWindow {
+function pageWindow(total: number, page: number): Omit<PageWindow, 'setPage'> {
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   // Searching while deep in the table would otherwise leave the reader past
   // the end of what is left. Clamping rather than resetting means clearing the
   // search puts them back where they were.
   const current = Math.min(page, pages - 1);
   const start = current * PAGE_SIZE;
-  return { from: start + 1, to: Math.min(total, start + PAGE_SIZE), total, page: current, pages, setPage };
+  return { from: start + 1, to: Math.min(total, start + PAGE_SIZE), total, page: current, pages };
 }
 
 function Pager({ from, to, total, page, pages, setPage, label }: PageWindow & { label: string }) {
