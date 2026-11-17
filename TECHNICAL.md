@@ -16,7 +16,7 @@ through an approval chain, and every state change lands in an audit log.
 
 ```mermaid
 flowchart LR
-    B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>22 endpoints"]
+    B["Next.js console<br/>3 roles"] -->|"Bearer JWT"| A["FastAPI<br/>26 endpoints"]
     A -->|"verify RS256 via JWKS"| C["AWS Cognito"]
     A -->|"SELECT … FOR UPDATE"| D[("PostgreSQL<br/>9 tables")]
     A -->|"read-through cache"| R[("Redis")]
@@ -161,8 +161,8 @@ the write or dropping the event. [`audit_events.py`](backend/app/audit_events.py
 
 ## Tests
 
-334 backend tests at 95% statement coverage, with an 80% floor enforced in
-CI, plus 33 browser tests driving the real console in Chromium and one more
+379 backend tests at 95% statement coverage, with an 80% floor enforced in
+CI, plus 38 browser tests driving the real console in Chromium and one more
 against a production build of it.
 
 ```
@@ -171,20 +171,20 @@ Name                                         Stmts   Miss  Cover
 app/agent/__init__.py                            3      0   100%
 app/agent/loop.py                               55      0   100%
 app/models.py                                  109      0   100%
-app/schemas.py                                 183      0   100%
+app/schemas.py                                 188      0   100%
 app/config.py                                   27      0   100%
-app/services.py                                243      1    99%
+app/services.py                                296      1    99%
 lambdas/receipt_validator/handler.py            59      1    98%
 app/agent/llm.py                                97      5    95%
 app/cache.py                                   141      7    95%
 lambdas/supplier_price_webhook/handler.py       80      4    95%
-app/main.py                                    240     15    94%
 app/agent/tools.py                              72      5    93%
+app/main.py                                    261     21    92%
 app/audit_events.py                            117     13    89%
-app/auth.py                                     75     16    79%
+app/auth.py                                     84     18    79%
 app/db.py                                       13      4    69%
 -----------------------------------------------------------------
-TOTAL                                         1514     71    95%
+TOTAL                                         1602     79    95%
 ```
 
 Includes a regression suite ([`tests/test_review_regressions.py`](backend/tests/test_review_regressions.py))
@@ -192,6 +192,14 @@ for defects an external code review found in the four features above — the
 kind that pass because a test checks that a design works *as imagined* rather
 than what the mechanism actually does. Kept as its own file because that
 pattern is the useful part, not any single fix.
+
+A second pass has its own file too ([`tests/test_second_review.py`](backend/tests/test_second_review.py)).
+Most of what it found was a `500` where the honest answer was a `4xx`: a
+supplier name already taken, a reimbursement naming an item that does not
+exist, a sign-in whose email belongs to another account. The rest were rules
+the code implied and did not enforce — an approver could approve their own
+claim, a price in USD was compared with the last one in CAD, and one
+malformed supplier submission stopped every submission behind it.
 
 The console has its own suite ([`e2e/`](e2e)), run in Chromium by Playwright
 against the dev server, because `lint` and `build` prove it compiles and say
@@ -215,7 +223,10 @@ configured, so a real deployment cannot be talked into it.
 `conftest.py` pins the suite to SQLite so it stays fast and isolated, which
 means the `SELECT … FOR UPDATE` lock is never really contended there — SQLite
 has no row-level locking to contend. `tests/test_concurrency.py` covers that
-gap against a real PostgreSQL and is skipped unless you point it at one:
+gap against a real PostgreSQL and is skipped unless you point it at one. The
+same file races twelve threads at the check-then-insert paths — one SKU, one
+supplier name, one first sign-in — because the unique index that settles
+those is also something a single SQLite connection cannot be made to contend:
 
 ```bash
 POSTGRES_TEST_URL=postgresql+psycopg://stockroom:stockroom@localhost:5432/stockroom_test \

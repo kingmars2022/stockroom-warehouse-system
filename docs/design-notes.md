@@ -118,7 +118,7 @@ Stockroom converts those disconnected activities into an accountable workflow. I
 
 1. An employee submits an expense with supplier, item, quantity, amount, business purpose, and receipt attachment.
 2. The employee can only see their own reimbursement records.
-3. A supervisor or administrator can approve or reject a `submitted` expense.
+3. A supervisor or administrator can approve or reject a `submitted` expense — but never their own. A claim submitted by someone who holds an approver role waits for a different approver; the API refuses the transition with `403` and the console does not offer the buttons.
 4. Only an administrator can mark an `approved` expense as `paid`.
 5. Each submission, approval, rejection, and payment state transition creates an audit log entry with actor, role, timestamp, target, and detail.
 
@@ -368,11 +368,16 @@ http://localhost:8000/docs
 | `POST` | `/api/purchases` | Admin, supervisor | Receive purchase and update stock |
 | `GET` | `/api/price-policy` | Admin, supervisor | Read price-increase threshold |
 | `PATCH` | `/api/price-policy` | Admin | Update price-increase threshold |
+| `GET` | `/api/appearance-policy` | Any authenticated user | Company-wide theme, accent and density the console starts from |
+| `PATCH` | `/api/appearance-policy` | Admin | Change the company appearance for everyone following the default |
 | `GET` | `/api/replenishment-recommendations` | Admin, supervisor | One page of the ranked purchase plan; `item_id`, `limit`, `offset`, `X-Total-Count` |
 | `GET` | `/api/expenses` | Any authenticated user | One page of expenses; `limit`, `offset`, `X-Total-Count`; employee scope is limited to their own submissions |
 | `POST` | `/api/expenses` | Any authenticated user | Submit expense |
-| `PATCH` | `/api/expenses/{expense_id}/status` | Supervisor/admin depending on transition | Approve, reject, or pay expense |
+| `PATCH` | `/api/expenses/{expense_id}/status` | Supervisor/admin depending on transition | Approve, reject, or pay expense; nobody reviews their own |
 | `GET` | `/api/audit-logs` | Admin | One page of the audit history; `limit`, `offset`, `X-Total-Count` |
+| `GET` | `/api/audit-events` | Admin | Search the structured audit events by action, quantity or price change |
+| `POST` | `/api/agent/replenishment` | Admin, supervisor | Ask the purchasing agent for a proposal; it proposes, a person approves |
+| `POST` | `/api/supplier-prices/ingest` | Admin | Apply the supplier price submissions parked by the webhook |
 | `POST` | `/api/attachments/presign` | Any authenticated user | Request private S3 receipt upload URL |
 | `GET` | `/api/attachments/download` | Authorized user | Request authorized private receipt download URL |
 
@@ -381,9 +386,9 @@ http://localhost:8000/docs
 | Status | Meaning |
 | --- | --- |
 | `401` | Missing, expired, invalid, or incorrect Cognito token |
-| `403` | Authenticated user does not have the required role or attachment access |
+| `403` | Authenticated user does not have the required role or attachment access, or is reviewing their own reimbursement |
 | `404` | Item, supplier, expense, or receipt record does not exist |
-| `409` | Stock issue would make inventory negative, or SKU already exists |
+| `409` | Stock issue would make inventory negative; SKU or supplier name already exists; sign-in email already belongs to another account |
 | `413` | Receipt exceeds the configured maximum file size |
 | `415` | Receipt file type is not accepted |
 | `503` | Cognito or receipt storage is not configured |

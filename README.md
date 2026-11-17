@@ -99,7 +99,7 @@ Small and mid-sized warehouses and logistics teams, with three kinds of users:
   151 KB, because every screen asks for the page it is showing. The inventory screen opens
   in about a sixth of a second, finding something to issue is a search box rather than a
   10,000-line dropdown, and working out what to reorder went from 3.3 seconds to under one.
-- **Thoroughly tested.** 334 automated tests cover 95% of the code, plus 34 that drive the
+- **Thoroughly tested.** 379 automated tests cover 95% of the code, plus 39 that drive the
   screens in a real browser, and every change is checked automatically before it goes in.
 
 ## Run the demo yourself
