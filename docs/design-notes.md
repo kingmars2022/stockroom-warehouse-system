@@ -410,7 +410,7 @@ http://localhost:8000/docs
 This is the fastest way to explore the product, role-specific pages, barcode workflow, forecast, supplier suggestions, expenses, and audit screens. It does not require Docker or AWS.
 
 ```bash
-cd /Users/siguangzhao/Documents/GitHub/my-projects/projects/Stockroom-system
+cd stockroom-warehouse-system
 npm install
 npm run dev -- --port 3001
 ```
@@ -442,7 +442,7 @@ Camera access requires a secure browser context. `http://localhost` works for a 
 This option starts PostgreSQL and FastAPI in Docker. It requires valid Cognito settings for authenticated API requests and a configured S3 bucket for receipt uploads.
 
 ```bash
-cd /Users/siguangzhao/Documents/GitHub/my-projects/projects/Stockroom-system
+cd stockroom-warehouse-system
 cp .env.example .env.local
 cp backend/.env.example backend/.env
 docker compose up --build
@@ -451,7 +451,7 @@ docker compose up --build
 In a second terminal, start the frontend:
 
 ```bash
-cd /Users/siguangzhao/Documents/GitHub/my-projects/projects/Stockroom-system
+cd stockroom-warehouse-system
 npm install
 npm run dev
 ```
