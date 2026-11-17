@@ -1,4 +1,5 @@
 import json
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -228,6 +229,11 @@ def update_price_threshold(db: Session, actor: User, threshold_percent: int) -> 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators can update price policy")
     setting = db.get(SystemSetting, PRICE_THRESHOLD_KEY)
     previous = int(setting.value) if setting else 15
+    # The console saves this field when focus leaves it, so an unchanged value
+    # arrives here often. Recording "changed from 15% to 15%" would fill a
+    # trail that is supposed to list changes with things that were not one.
+    if previous == threshold_percent:
+        return threshold_percent
     if setting is None:
         setting = SystemSetting(key=PRICE_THRESHOLD_KEY, value=str(threshold_percent), updated_by_id=actor.id)
         db.add(setting)
@@ -237,6 +243,42 @@ def update_price_threshold(db: Session, actor: User, threshold_percent: int) -> 
     write_audit(db, actor, "updated_price_alert_policy", "system_setting", PRICE_THRESHOLD_KEY, f"Price threshold changed from {previous}% to {threshold_percent}%", payload={"previous_percent": previous, "new_percent": threshold_percent})
     db.commit()
     return threshold_percent
+
+
+APPEARANCE_KEY = "company_appearance"
+
+
+def get_appearance_policy(db: Session) -> dict:
+    """The stored company default, or an empty dict for "never set" so the
+    caller's own defaults apply."""
+    setting = db.get(SystemSetting, APPEARANCE_KEY)
+    if setting is None:
+        return {}
+    try:
+        stored = json.loads(setting.value)
+    except ValueError:
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def update_appearance_policy(db: Session, actor: User, appearance: dict) -> dict:
+    if actor.role is not Role.admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators can change the company appearance")
+    if get_appearance_policy(db) == appearance:
+        return appearance
+    setting = db.get(SystemSetting, APPEARANCE_KEY)
+    if setting is None:
+        db.add(SystemSetting(key=APPEARANCE_KEY, value=json.dumps(appearance), updated_by_id=actor.id))
+    else:
+        setting.value = json.dumps(appearance)
+        setting.updated_by_id = actor.id
+    write_audit(
+        db, actor, "updated_company_appearance", "system_setting", APPEARANCE_KEY,
+        f"Default theme: {appearance['mode']}; accent: {appearance['accent']}; density: {appearance['density']}",
+        payload=dict(appearance),
+    )
+    db.commit()
+    return appearance
 
 
 def record_movement(db: Session, actor: User, item_id, kind: MovementKind, quantity: int, recipient: str, note: str) -> StockMovement:
@@ -267,26 +309,39 @@ def record_movement(db: Session, actor: User, item_id, kind: MovementKind, quant
 def record_purchase(db: Session, actor: User, item_id, supplier_id, quantity: int, unit_cost: float, currency: str, invoice_number: str, receipt_key: str | None, receipt_version_id: str | None = None) -> Purchase:
     if actor.role is Role.employee:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Employees cannot receive purchases")
+    currency = currency.upper()
+    # Before the lock, not under it. This is a round trip to S3, and inside the
+    # transaction below it was made while holding the item's row -- every other
+    # issue or receipt of that item waited on a network call.
+    if receipt_key:
+        assert_receipt_ownership(receipt_key, actor, receipt_version_id)
     with db.begin_nested():
         item = db.scalar(select(Item).where(Item.id == item_id).with_for_update())
         if item is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
         if db.get(Supplier, supplier_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
-        previous = db.scalar(select(Purchase).where(Purchase.item_id == item_id).order_by(Purchase.created_at.desc()).limit(1))
-        if receipt_key:
-            assert_receipt_ownership(receipt_key, actor, receipt_version_id)
+        # The last price in the same currency. 10.00 USD followed by 13.50 CAD
+        # is an exchange rate, not a 35% rise, and there is no rate stored here
+        # to convert with -- the supplier-quote path below already refuses that
+        # comparison, and this one made it and raised the alert.
+        previous = db.scalar(
+            select(Purchase)
+            .where(Purchase.item_id == item_id, Purchase.currency == currency)
+            .order_by(Purchase.created_at.desc(), Purchase.id)
+            .limit(1)
+        )
         previous_cost = float(previous.unit_cost) if previous else 0
         change = round(((unit_cost - previous_cost) / previous_cost) * 100, 1) if previous_cost else 0
         item.quantity_on_hand += quantity
-        purchase = Purchase(item_id=item_id, supplier_id=supplier_id, received_by_id=actor.id, quantity=quantity, unit_cost=Decimal(str(unit_cost)), currency=currency.upper(), invoice_number=invoice_number, receipt_key=receipt_key, receipt_version_id=receipt_version_id, price_change_percent=change)
+        purchase = Purchase(item_id=item_id, supplier_id=supplier_id, received_by_id=actor.id, quantity=quantity, unit_cost=Decimal(str(unit_cost)), currency=currency, invoice_number=invoice_number, receipt_key=receipt_key, receipt_version_id=receipt_version_id, price_change_percent=change)
         db.add(purchase)
         db.flush()
         db.add(StockMovement(item_id=item.id, kind=MovementKind.inbound, quantity=quantity, actor_id=actor.id, recipient="supplier", note=f"Purchase {invoice_number or 'unreferenced'}"))
         write_audit(
             db, actor, "received_purchase", "purchase", str(purchase.id),
-            f"{quantity} {item.unit} at {unit_cost:.2f} {currency.upper()}; price change {change}%",
-            payload={"item_id": str(item.id), "item_name": item.name, "supplier_id": str(supplier_id), "quantity": quantity, "unit_cost": float(unit_cost), "previous_unit_cost": previous_cost, "price_change_percent": change, "currency": currency.upper(), "invoice_number": invoice_number},
+            f"{quantity} {item.unit} at {unit_cost:.2f} {currency}; price change {change}%",
+            payload={"item_id": str(item.id), "item_name": item.name, "supplier_id": str(supplier_id), "quantity": quantity, "unit_cost": float(unit_cost), "previous_unit_cost": previous_cost, "price_change_percent": change, "currency": currency, "invoice_number": invoice_number},
         )
     db.commit()
     db.refresh(purchase)
@@ -298,14 +353,22 @@ def create_expense(db: Session, actor: User, **values) -> Expense:
     receipt_key = values.get("receipt_key")
     if receipt_key:
         assert_receipt_ownership(receipt_key, actor, values.get("receipt_version_id"))
+    # Stored the way purchases are, and the way the audit entry below already
+    # claimed: the same code was "CAD" in one table and "cad" in the other.
+    values["currency"] = values["currency"].upper()
+    # Checked here rather than left to the foreign key. PostgreSQL refuses the
+    # insert and the request dies as a 500; SQLite does not enforce the key and
+    # stores a reference to nothing.
+    if values.get("item_id") is not None and db.get(Item, values["item_id"]) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
     with db.begin_nested():
         expense = Expense(submitter_id=actor.id, **values)
         db.add(expense)
         db.flush()
         write_audit(
             db, actor, "submitted_reimbursement", "expense", str(expense.id),
-            f"{values['amount']:.2f} {values['currency'].upper()} submitted",
-            payload={"amount": float(values["amount"]), "currency": values["currency"].upper(), "status": ExpenseStatus.submitted.value, "has_receipt": bool(receipt_key)},
+            f"{values['amount']:.2f} {values['currency']} submitted",
+            payload={"amount": float(values["amount"]), "currency": values["currency"], "status": ExpenseStatus.submitted.value, "has_receipt": bool(receipt_key)},
         )
     db.commit()
     db.refresh(expense)
@@ -320,6 +383,11 @@ def update_expense_status(db: Session, actor: User, expense_id, next_status: Exp
         if next_status in {ExpenseStatus.approved, ExpenseStatus.rejected}:
             if actor.role not in {Role.admin, Role.supervisor} or expense.status is not ExpenseStatus.submitted:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only a supervisor or administrator can review a submitted expense")
+            # The approval step exists so that a second person signs off. A
+            # supervisor could submit a claim and approve it in the next
+            # request, and an administrator could go on to pay themselves.
+            if expense.submitter_id == actor.id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot review your own reimbursement; another supervisor or administrator has to")
         elif next_status is ExpenseStatus.paid:
             if actor.role is not Role.admin or expense.status is not ExpenseStatus.approved:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an administrator can pay an approved expense")
@@ -374,10 +442,44 @@ def ingest_supplier_prices(db: Session, actor: User) -> list[dict]:
             results.append({"key": key, "status": "unreadable"})
             continue
 
+        # The webhook validates before it parks anything, but this reads the
+        # prefix rather than the webhook, and whatever is there was trusted. A
+        # submission that could not be processed raised, nothing was deleted,
+        # and the same object failed every later call -- with everything queued
+        # behind it. It is reported and left in place for someone to look at;
+        # deleting what was not understood would hide it.
+        if _price_submission_error(submission):
+            results.append({"key": key, "status": "malformed"})
+            continue
+
         results.append(apply_price_submission(db, actor, submission, threshold))
         client.delete_object(Bucket=settings.receipt_bucket_name, Key=key)
 
     return results
+
+
+def _price_submission_error(submission) -> str | None:
+    """Why a parked submission cannot be applied, or None when it can.
+
+    The same shape the webhook insists on before parking one.
+    """
+    if not isinstance(submission, dict):
+        return "not an object"
+    if not isinstance(submission.get("sku"), str):
+        return "sku is not text"
+    cost = submission.get("unit_cost")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float, str)):
+        return "unit_cost is not a number"
+    try:
+        cost = float(cost)
+    except ValueError:
+        return "unit_cost is not a number"
+    if not math.isfinite(cost) or cost <= 0:
+        return "unit_cost is not a positive finite number"
+    currency = submission.get("currency")
+    if not isinstance(currency, str) or len(currency) != 3 or not currency.isalpha():
+        return "currency is not a 3-letter code"
+    return None
 
 
 def apply_price_submission(db: Session, actor: User, submission: dict, threshold: int) -> dict:

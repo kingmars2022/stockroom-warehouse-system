@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -50,10 +51,12 @@ def decode_cognito_token(token: str) -> dict:
 
 
 def resolve_role(claims: dict) -> Role:
-    groups = claims.get("cognito:groups", [])
-    for group in groups:
-        if group in Role._value2member_map_:
-            return Role(group)
+    groups = set(claims.get("cognito:groups") or [])
+    # The most privileged group decides. Taking the first match meant a user in
+    # both "employee" and "admin" got whichever Cognito happened to list first.
+    for role in (Role.admin, Role.supervisor):
+        if role.value in groups:
+            return role
     # Cognito self-registration always starts as the least-privileged role.
     # Administrators promote users by assigning the supervisor or admin group.
     return Role.employee
@@ -73,17 +76,31 @@ def get_current_user(
     role = resolve_role(claims)
     user = db.scalar(select(User).where(User.cognito_sub == subject))
     name = claims.get("name") or email.split("@")[0]
-    if user is None:
-        user = User(cognito_sub=subject, email=email, name=name, role=role)
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    elif not user.active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is inactive")
-    elif user.role != role or user.email != email or user.name != name:
-        user.role, user.email, user.name = role, email, name
-        db.commit()
-        db.refresh(user)
+    try:
+        if user is None:
+            user = User(cognito_sub=subject, email=email, name=name, role=role)
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        elif not user.active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is inactive")
+        elif user.role != role or user.email != email or user.name != name:
+            user.role, user.email, user.name = role, email, name
+            db.commit()
+            db.refresh(user)
+    except IntegrityError:
+        # Two unique columns can refuse this write, and neither is a server
+        # error. A browser's first requests after sign-in arrive together, so
+        # two of them can both find no row and both insert it: the loser reads
+        # back the row the winner wrote. Anything left is the email already
+        # belonging to a different Cognito identity, which is a conflict to
+        # report rather than a stack trace.
+        db.rollback()
+        user = db.scalar(select(User).where(User.cognito_sub == subject))
+        if user is None or user.email != email:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This email address is already linked to another account")
+        if not user.active:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is inactive")
     return user
 
 

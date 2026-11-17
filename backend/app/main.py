@@ -5,18 +5,20 @@ from datetime import datetime
 import boto3
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 
 from .auth import get_current_user, require_roles
 from .config import get_settings
 from .db import get_db
 from .models import AuditLog, Expense, Item, MovementKind, Purchase, Role, StockMovement, Supplier, User
-from .schemas import AgentRequest, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, ItemSummaryResponse, MeResponse, MovementCreate, MovementResponse, PriceAlertResponse, PriceAlternative, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
+from .schemas import AgentRequest, AppearancePolicy, AuditEventResponse, AuditResponse, ExpenseCreate, ExpenseResponse, ExpenseStatusUpdate, ItemCreate, ItemResponse, ItemSummaryResponse, MeResponse, MovementCreate, MovementResponse, PriceAlertResponse, PriceAlternative, PricePolicyUpdate, PurchaseCreate, PurchaseResponse, ReplenishmentRecommendation, SupplierCreate, SupplierResponse, UploadIntent, UploadResponse
 from .agent import build_client, run_agent
 from .audit_events import get_event_store, query as query_events
 from .cache import get_cache
-from .services import assert_receipt_validated, cached_replenishment_recommendations, create_expense, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_expense_status, update_price_threshold, write_audit
+from .services import assert_receipt_validated, cached_replenishment_recommendations, create_expense, get_appearance_policy, get_price_threshold, ingest_supplier_prices, invalidate_replenishment_cache, record_movement, record_purchase, update_appearance_policy, update_expense_status, update_price_threshold, write_audit
 
 settings = get_settings()
 
@@ -200,12 +202,19 @@ def read_item_summary(
 def create_item(payload: ItemCreate, db: Session = Depends(get_db), user: User = Depends(require_roles(Role.admin))):
     if db.scalar(select(Item).where(Item.sku == payload.sku)):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SKU already exists")
-    with db.begin_nested():
-        item = Item(**payload.model_dump())
-        db.add(item)
-        db.flush()
-        write_audit(db, user, "created_item", "item", str(item.id), f"Created SKU {item.sku}", payload={"sku": item.sku, "item_name": item.name, "category": item.category, "unit": item.unit, "minimum_quantity": item.minimum_quantity})
-    db.commit()
+    try:
+        with db.begin_nested():
+            item = Item(**payload.model_dump())
+            db.add(item)
+            db.flush()
+            write_audit(db, user, "created_item", "item", str(item.id), f"Created SKU {item.sku}", payload={"sku": item.sku, "item_name": item.name, "category": item.category, "unit": item.unit, "minimum_quantity": item.minimum_quantity})
+        db.commit()
+    except IntegrityError:
+        # The check above and the insert are two statements. Two requests for
+        # the same SKU can both pass the check, and the second then meets the
+        # unique index -- which is the same answer, not a server error.
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SKU already exists")
     db.refresh(item)
     invalidate_replenishment_cache()
     return item
@@ -258,12 +267,22 @@ def list_suppliers(_: User = Depends(require_roles(Role.admin, Role.supervisor))
 
 @app.post("/api/suppliers", response_model=SupplierResponse, status_code=status.HTTP_201_CREATED)
 def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db), user: User = Depends(require_roles(Role.admin))):
-    with db.begin_nested():
-        supplier = Supplier(**payload.model_dump())
-        db.add(supplier)
-        db.flush()
-        write_audit(db, user, "created_supplier", "supplier", str(supplier.id), f"Created supplier {supplier.name}", payload={"supplier_name": supplier.name, "lead_days": supplier.lead_days, "rating": float(supplier.rating), "status": supplier.status.value})
-    db.commit()
+    # `suppliers.name` is unique and nothing here checked it, so a second
+    # supplier with a name already in use reached the constraint and came back
+    # as a 500. The check gives the answer; the except covers two requests
+    # passing the check together.
+    if db.scalar(select(Supplier.id).where(Supplier.name == payload.name)):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A supplier with this name already exists")
+    try:
+        with db.begin_nested():
+            supplier = Supplier(**payload.model_dump())
+            db.add(supplier)
+            db.flush()
+            write_audit(db, user, "created_supplier", "supplier", str(supplier.id), f"Created supplier {supplier.name}", payload={"supplier_name": supplier.name, "lead_days": supplier.lead_days, "rating": float(supplier.rating), "status": supplier.status.value})
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A supplier with this name already exists")
     db.refresh(supplier)
     invalidate_replenishment_cache()
     return supplier
@@ -374,6 +393,25 @@ def read_price_policy(_: User = Depends(require_roles(Role.admin, Role.superviso
 @app.patch("/api/price-policy")
 def set_price_policy(payload: PricePolicyUpdate, db: Session = Depends(get_db), user: User = Depends(require_roles(Role.admin))):
     return {"threshold_percent": update_price_threshold(db, user, payload.threshold_percent)}
+
+
+@app.get("/api/appearance-policy", response_model=AppearancePolicy)
+def read_appearance_policy(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Readable by every role: it is how the console looks for all of them.
+
+    Every sign-in reads this, so a stored value that no longer validates -- a
+    choice that was since withdrawn, a row edited by hand -- falls back to the
+    defaults rather than failing the request the whole console loads behind.
+    """
+    try:
+        return AppearancePolicy(**get_appearance_policy(db))
+    except ValidationError:
+        return AppearancePolicy()
+
+
+@app.patch("/api/appearance-policy", response_model=AppearancePolicy)
+def set_appearance_policy(payload: AppearancePolicy, db: Session = Depends(get_db), user: User = Depends(require_roles(Role.admin))):
+    return update_appearance_policy(db, user, payload.model_dump())
 
 
 @app.get("/api/replenishment-recommendations", response_model=list[ReplenishmentRecommendation])

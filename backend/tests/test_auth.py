@@ -31,8 +31,11 @@ def test_unknown_groups_do_not_grant_privileges():
     assert resolve_role({"cognito:groups": ["superuser", "root"]}) is Role.employee
 
 
-def test_the_first_recognised_group_wins():
-    assert resolve_role({"cognito:groups": ["nonsense", "supervisor", "admin"]}) is Role.supervisor
+def test_the_most_privileged_recognised_group_wins():
+    # Used to be "the first recognised group", which made the role depend on
+    # the order Cognito happened to list the groups in.
+    assert resolve_role({"cognito:groups": ["nonsense", "supervisor", "admin"]}) is Role.admin
+    assert resolve_role({"cognito:groups": ["admin", "supervisor", "nonsense"]}) is Role.admin
 
 
 # --------------------------------------------------------------------------

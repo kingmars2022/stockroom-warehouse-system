@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +56,19 @@ class ItemSummaryResponse(BaseModel):
     low_stock: list[ItemResponse]
 
 
+class AppearancePolicy(BaseModel):
+    """The look every account starts from until its owner chooses their own.
+
+    The console offered an administrator this as the "company default" and
+    kept it in the browser: it was never sent anywhere, reverted on the next
+    reload, and no other user ever saw it.
+    """
+
+    mode: Literal["light", "dark", "system"] = "system"
+    accent: Literal["green", "blue", "orange"] = "green"
+    density: Literal["comfortable", "compact"] = "comfortable"
+
+
 class MovementCreate(BaseModel):
     item_id: UUID
     kind: MovementKind
@@ -102,7 +116,7 @@ class PurchaseCreate(BaseModel):
     supplier_id: UUID
     quantity: int = Field(gt=0)
     unit_cost: float = Field(gt=0)
-    currency: str = Field(default="CAD", min_length=3, max_length=3)
+    currency: str = Field(default="CAD", pattern=r"^[A-Za-z]{3}$")
     invoice_number: str = Field(default="", max_length=120)
     receipt_key: str | None = Field(default=None, max_length=512)
     receipt_version_id: str | None = Field(default=None, max_length=256)
@@ -150,7 +164,7 @@ class ExpenseCreate(BaseModel):
     supplier: str = Field(min_length=2, max_length=200)
     quantity: int = Field(gt=0)
     amount: float = Field(gt=0)
-    currency: str = Field(default="CAD", min_length=3, max_length=3)
+    currency: str = Field(default="CAD", pattern=r"^[A-Za-z]{3}$")
     purpose: str = Field(min_length=3, max_length=2000)
     receipt_key: str | None = Field(default=None, max_length=512)
     receipt_version_id: str | None = Field(default=None, max_length=256)
